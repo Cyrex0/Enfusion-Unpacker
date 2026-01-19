@@ -1,0 +1,19 @@
+﻿{
+    "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+    "name": "enfusion-unpacker",
+    "version": "1.0.0",
+    "description": "Professional Enfusion Engine addon extractor and viewer",
+    "dependencies": [
+        "zlib",
+        "lz4",
+        "nlohmann-json",
+        "glfw3",
+        "glad",
+        {
+            "name": "imgui",
+            "features": ["glfw-binding", "opengl3-binding", "docking-experimental"]
+        },
+        "stb",
+        "glm"
+    ]
+}
