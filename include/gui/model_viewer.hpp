@@ -25,21 +25,21 @@ public:
     ~ModelViewer();
 
     void render();
-    
+
     /**
      * Load model from raw XOB data.
      */
     void load_model_data(const std::vector<uint8_t>& data, const std::string& name);
-    
+
     /**
      * Load model from file path.
      */
     void load_model(const std::filesystem::path& path);
 
-    void clear() {
-        current_mesh_.reset();
-        model_loaded_ = false;
-    }
+    /**
+     * Clear current model.
+     */
+    void clear();
 
     bool has_mesh() const { return model_loaded_; }
 

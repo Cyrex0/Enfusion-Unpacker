@@ -23,6 +23,9 @@ TextureViewer::~TextureViewer() {
 }
 
 void TextureViewer::load_texture_data(const std::vector<uint8_t>& data, const std::string& name) {
+    // ALWAYS clear previous texture first
+    clear();
+    
     texture_name_ = name;
     loading_ = true;
     error_message_.clear();
@@ -35,14 +38,13 @@ void TextureViewer::load_texture_data(const std::vector<uint8_t>& data, const st
         }
 
         std::vector<uint8_t> dds_data;
-        
-        // Check if EDDS (starts with "DDS " but could be EDDS format)
-        // Try EDDS conversion first
+
+        // Check if EDDS (starts with "DDS " but has COPY/LZ4 mip table)
         EddsConverter converter(std::span<const uint8_t>(data.data(), data.size()));
         if (converter.is_edds()) {
             dds_data = converter.convert();
             if (dds_data.empty()) {
-                // Not actually EDDS, use original data
+                // Conversion failed, try original data
                 dds_data = data;
             }
         } else {
@@ -63,11 +65,13 @@ void TextureViewer::load_texture_data(const std::vector<uint8_t>& data, const st
         format_ = result->format;
         mip_levels_ = result->mip_count;
 
+        // Create OpenGL texture
         create_gl_texture();
 
         texture_loaded_ = true;
         loading_ = false;
 
+        // Reset view for new texture
         zoom_ = 1.0f;
         pan_x_ = 0.0f;
         pan_y_ = 0.0f;
@@ -80,23 +84,44 @@ void TextureViewer::load_texture_data(const std::vector<uint8_t>& data, const st
 
 void TextureViewer::load_texture(const std::filesystem::path& path) {
     current_path_ = path;
-    
     auto data = read_file(path);
     load_texture_data(data, path.filename().string());
 }
 
 void TextureViewer::clear() {
+    // Delete existing OpenGL texture
     if (texture_id_ != 0) {
         glDeleteTextures(1, &texture_id_);
         texture_id_ = 0;
     }
+    
+    // Clear all state
     texture_loaded_ = false;
+    loading_ = false;
+    error_message_.clear();
     pixel_data_.clear();
+    texture_name_.clear();
+    width_ = 0;
+    height_ = 0;
+    channels_ = 4;
+    mip_levels_ = 1;
+    format_.clear();
+    
+    // Reset view
+    zoom_ = 1.0f;
+    pan_x_ = 0.0f;
+    pan_y_ = 0.0f;
 }
 
 void TextureViewer::create_gl_texture() {
+    // Delete any existing texture
     if (texture_id_ != 0) {
         glDeleteTextures(1, &texture_id_);
+        texture_id_ = 0;
+    }
+
+    if (pixel_data_.empty() || width_ == 0 || height_ == 0) {
+        return;
     }
 
     glGenTextures(1, &texture_id_);
@@ -111,6 +136,8 @@ void TextureViewer::create_gl_texture() {
     glTexImage2D(GL_TEXTURE_2D, 0, gl_format, width_, height_, 0, gl_format,
                  GL_UNSIGNED_BYTE, pixel_data_.data());
     glGenerateMipmap(GL_TEXTURE_2D);
+    
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 void TextureViewer::destroy_gl_texture() {
@@ -142,7 +169,7 @@ void TextureViewer::render() {
         return;
     }
 
-    if (!texture_loaded_) {
+    if (!texture_loaded_ || texture_id_ == 0) {
         ImGui::TextDisabled("No texture loaded.");
         ImGui::TextDisabled("Select a .edds or .dds file.");
         return;
@@ -257,7 +284,7 @@ void TextureViewer::render_toolbar() {
     ImGui::SameLine();
 
     if (ImGui::Button("Export PNG")) {
-        // TODO
+        // TODO: Implement PNG export
     }
 }
 
@@ -276,12 +303,13 @@ void TextureViewer::render_channel_selector() {
 void TextureViewer::render_info_bar() {
     ImGui::TextDisabled("%dx%d | %s | %d mips | Zoom: %.0f%%",
                         width_, height_, format_.c_str(), mip_levels_, zoom_ * 100.0f);
-
     ImGui::SameLine(ImGui::GetWindowWidth() - 200);
     ImGui::TextDisabled("%s", texture_name_.c_str());
 }
 
 void TextureViewer::fit_to_view(float view_width, float view_height) {
+    if (width_ == 0 || height_ == 0) return;
+    
     float scale_x = view_width / static_cast<float>(width_);
     float scale_y = view_height / static_cast<float>(height_);
     zoom_ = std::min(scale_x, scale_y) * 0.9f;

@@ -8,6 +8,7 @@
 #include <vector>
 #include <span>
 #include <cstdint>
+#include <array>
 #include <filesystem>
 
 namespace enfusion {
@@ -45,6 +46,7 @@ private:
     uint32_t bytes_per_block_ = 16;
     uint32_t dxgi_format_ = 0;
     std::string format_;
+    std::vector<std::pair<std::array<uint8_t, 4>, uint32_t>> mip_table_;
 };
 
 } // namespace enfusion

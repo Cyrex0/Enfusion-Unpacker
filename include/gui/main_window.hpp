@@ -9,6 +9,7 @@
 #include "gui/file_browser.hpp"
 #include "gui/texture_viewer.hpp"
 #include "gui/model_viewer.hpp"
+#include "gui/text_viewer.hpp"
 #include "gui/export_dialog.hpp"
 #include "gui/settings_dialog.hpp"
 #include <imgui.h>
@@ -47,6 +48,7 @@ private:
     std::unique_ptr<FileBrowser> file_browser_;
     std::unique_ptr<TextureViewer> texture_viewer_;
     std::unique_ptr<ModelViewer> model_viewer_;
+    std::unique_ptr<TextViewer> text_viewer_;
     std::unique_ptr<ExportDialog> export_dialog_;
     std::unique_ptr<SettingsDialog> settings_dialog_;
 
@@ -59,6 +61,7 @@ private:
     bool show_file_browser_ = true;
     bool show_texture_viewer_ = true;
     bool show_model_viewer_ = true;
+    bool show_text_viewer_ = true;
     bool show_export_dialog_ = false;
     bool show_settings_ = false;
     bool show_about_ = false;

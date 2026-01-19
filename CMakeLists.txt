@@ -76,6 +76,7 @@ set(GUI_SOURCES
     src/gui/file_browser.cpp
     src/gui/texture_viewer.cpp
     src/gui/model_viewer.cpp
+    src/gui/text_viewer.cpp
     src/gui/export_dialog.cpp
     src/gui/settings_dialog.cpp
     src/gui/theme.cpp

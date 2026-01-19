@@ -33,11 +33,37 @@ ModelViewer::~ModelViewer() {
     }
 }
 
+void ModelViewer::clear() {
+    // Clear mesh data
+    current_mesh_.reset();
+    renderer_->set_mesh(nullptr);
+    
+    // Reset state
+    model_loaded_ = false;
+    loading_ = false;
+    error_message_.clear();
+    model_name_.clear();
+    vertex_count_ = 0;
+    face_count_ = 0;
+    lod_count_ = 0;
+    
+    // Reset bounds
+    bounds_min_ = glm::vec3(0.0f);
+    bounds_max_ = glm::vec3(0.0f);
+    
+    // Reset camera to default
+    camera_->set_distance(5.0f);
+    camera_->set_angles(45.0f, 30.0f);
+    camera_->set_target(glm::vec3(0.0f));
+}
+
 void ModelViewer::load_model_data(const std::vector<uint8_t>& data, const std::string& name) {
+    // ALWAYS clear previous model first
+    clear();
+    
     model_name_ = name;
     loading_ = true;
     error_message_.clear();
-    current_mesh_.reset();
 
     try {
         if (data.empty()) {
@@ -55,23 +81,35 @@ void ModelViewer::load_model_data(const std::vector<uint8_t>& data, const std::s
             return;
         }
 
+        // Validate mesh data
+        if (mesh->vertices.empty()) {
+            error_message_ = "XOB file has no vertices";
+            loading_ = false;
+            return;
+        }
+
+        if (mesh->lods.empty() || mesh->lods[0].indices.empty()) {
+            error_message_ = "XOB file has no indices";
+            loading_ = false;
+            return;
+        }
+
         current_mesh_ = std::make_unique<XobMesh>(std::move(*mesh));
         renderer_->set_mesh(current_mesh_.get());
 
         vertex_count_ = current_mesh_->vertices.size();
-        face_count_ = current_mesh_->lods.empty() ? 0 : current_mesh_->lods[0].indices.size() / 3;
+        face_count_ = current_mesh_->lods[0].indices.size() / 3;
         lod_count_ = static_cast<int>(current_mesh_->lods.size());
         if (lod_count_ == 0) lod_count_ = 1;
 
         calculate_bounds();
 
-        camera_->set_target(glm::vec3(
-            (bounds_min_.x + bounds_max_.x) / 2.0f,
-            (bounds_min_.y + bounds_max_.y) / 2.0f,
-            (bounds_min_.z + bounds_max_.z) / 2.0f
-        ));
+        // Center camera on model
+        glm::vec3 center = (bounds_min_ + bounds_max_) * 0.5f;
+        camera_->set_target(center);
 
         float model_size = glm::length(bounds_max_ - bounds_min_);
+        if (model_size < 0.001f) model_size = 1.0f;
         camera_->set_distance(model_size * 1.5f);
 
         model_loaded_ = true;
@@ -85,7 +123,6 @@ void ModelViewer::load_model_data(const std::vector<uint8_t>& data, const std::s
 
 void ModelViewer::load_model(const std::filesystem::path& path) {
     current_path_ = path;
-    
     auto data = read_file(path);
     load_model_data(data, path.filename().string());
 }
@@ -116,6 +153,7 @@ void ModelViewer::reset_camera() {
         glm::vec3 center = (bounds_min_ + bounds_max_) * 0.5f;
         camera_->set_target(center);
         float size = glm::length(bounds_max_ - bounds_min_);
+        if (size < 0.001f) size = 1.0f;
         camera_->set_distance(size * 1.5f);
     }
 }
@@ -164,10 +202,26 @@ void ModelViewer::render() {
     int view_width = static_cast<int>(content_region.x);
     int view_height = static_cast<int>(content_region.y - 30);
 
+    if (loading_) {
+        ImGui::Text("Loading model...");
+        return;
+    }
+
+    if (!error_message_.empty()) {
+        ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", error_message_.c_str());
+        return;
+    }
+
+    if (!model_loaded_ || !current_mesh_) {
+        ImGui::TextDisabled("No model loaded.");
+        ImGui::TextDisabled("Select a .xob file to view.");
+        return;
+    }
+
     if (view_width > 0 && view_height > 0) {
         ensure_framebuffer(view_width, view_height);
 
-        if (fbo_ != 0 && model_loaded_ && current_mesh_) {
+        if (fbo_ != 0) {
             glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
             glViewport(0, 0, view_width, view_height);
             glClearColor(bg_color_.r, bg_color_.g, bg_color_.b, 1.0f);
@@ -187,8 +241,8 @@ void ModelViewer::render() {
 
         if (fb_texture_ != 0) {
             ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(fb_texture_)),
-                        ImVec2(static_cast<float>(view_width), static_cast<float>(view_height)),
-                        ImVec2(0, 1), ImVec2(1, 0));
+                         ImVec2(static_cast<float>(view_width), static_cast<float>(view_height)),
+                         ImVec2(0, 1), ImVec2(1, 0));
 
             if (ImGui::IsItemHovered()) {
                 auto& io = ImGui::GetIO();
@@ -202,11 +256,6 @@ void ModelViewer::render() {
                     camera_->pan(io.MouseDelta.x * 0.01f, io.MouseDelta.y * 0.01f);
                 }
             }
-        }
-    } else if (!model_loaded_) {
-        ImGui::Text("No model loaded");
-        if (!error_message_.empty()) {
-            ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "%s", error_message_.c_str());
         }
     }
 
