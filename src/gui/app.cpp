@@ -51,6 +51,7 @@ bool App::init_glfw() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
+    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);  // Remove Windows title bar
     
     window_ = glfwCreateWindow(width_, height_, "Enfusion Unpacker", nullptr, nullptr);
     if (!window_) {

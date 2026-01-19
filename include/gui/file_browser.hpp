@@ -83,6 +83,19 @@ public:
      * Get the addon extractor (for reading files)
      */
     std::shared_ptr<AddonExtractor> extractor() const { return extractor_; }
+    
+    /**
+     * Get all texture file paths (.edds files)
+     */
+    std::vector<std::string> get_texture_paths() const {
+        std::vector<std::string> textures;
+        for (const auto& entry : entries_) {
+            if (entry.type == FileType::Texture && !entry.is_directory) {
+                textures.push_back(entry.path);
+            }
+        }
+        return textures;
+    }
 
     void clear() {
         entries_.clear();

@@ -13,8 +13,11 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <functional>
 
 namespace enfusion {
+
+class AddonExtractor;
 
 /**
  * Panel for viewing XOB 3D models.
@@ -42,6 +45,21 @@ public:
     void clear();
 
     bool has_mesh() const { return model_loaded_; }
+    
+    /**
+     * Set texture loader callback - takes a relative path, returns texture data
+     */
+    void set_texture_loader(std::function<std::vector<uint8_t>(const std::string&)> loader) {
+        texture_loader_ = loader;
+    }
+    
+    /**
+     * Set available texture list for texture browser
+     */
+    void set_available_textures(const std::vector<std::string>& textures) {
+        available_textures_ = textures;
+        filtered_textures_ = textures;
+    }
 
 private:
     void render_toolbar();
@@ -84,6 +102,24 @@ private:
     uint32_t fb_depth_ = 0;
     int fb_width_ = 0;
     int fb_height_ = 0;
+    
+    // Texture loading
+    std::function<std::vector<uint8_t>(const std::string&)> texture_loader_;
+    uint32_t diffuse_texture_ = 0;
+    
+    // Texture browser
+    std::vector<std::string> available_textures_;
+    std::vector<std::string> filtered_textures_;
+    std::string current_texture_path_;
+    char texture_filter_[256] = "";
+    int selected_texture_idx_ = -1;
+    bool show_texture_browser_ = false;
+    
+    void load_material_textures();
+    void destroy_textures();
+    void apply_texture(const std::string& path);
+    void render_texture_browser();
+    void filter_textures();
 };
 
 } // namespace enfusion

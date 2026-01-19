@@ -5,6 +5,7 @@
 #include "renderer/mesh_renderer.hpp"
 #include "renderer/shader.hpp"
 #include <glad/glad.h>
+#include <iostream>
 
 namespace enfusion {
 
@@ -51,6 +52,16 @@ void MeshRenderer::set_mesh(const XobMesh* mesh) {
 void MeshRenderer::upload_mesh() {
     if (!mesh_) return;
     
+    std::cerr << "[Renderer] Uploading mesh: verts=" << mesh_->vertices.size() 
+              << " indices=" << mesh_->indices.size() << "\n";
+    
+    // Debug: Print first few vertices
+    for (size_t i = 0; i < std::min(size_t(3), mesh_->vertices.size()); i++) {
+        const auto& v = mesh_->vertices[i];
+        std::cerr << "[Renderer]   Vert " << i << ": pos=(" << v.position.x << ", " 
+                  << v.position.y << ", " << v.position.z << ")\n";
+    }
+    
     // Clean up old buffers
     if (vao_ != 0) {
         glDeleteVertexArrays(1, &vao_);
@@ -78,6 +89,8 @@ void MeshRenderer::upload_mesh() {
                  mesh_->indices.size() * sizeof(uint32_t),
                  mesh_->indices.data(),
                  GL_STATIC_DRAW);
+    
+    std::cerr << "[Renderer] VAO=" << vao_ << " VBO=" << vbo_ << " EBO=" << ebo_ << "\n";
     
     // Set vertex attributes
     // Position
@@ -150,7 +163,16 @@ void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projectio
     mesh_shader_->set_vec3("lightDir", glm::normalize(glm::vec3(0.5f, -1.0f, 0.3f)));
     mesh_shader_->set_vec3("lightColor", glm::vec3(1.0f));
     mesh_shader_->set_vec3("objectColor", glm::vec3(0.8f, 0.8f, 0.85f));
-    mesh_shader_->set_bool("useTexture", false);
+    
+    // Bind diffuse texture if available
+    if (diffuse_texture_ != 0) {
+        mesh_shader_->set_bool("useTexture", true);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, diffuse_texture_);
+        mesh_shader_->set_int("diffuseMap", 0);
+    } else {
+        mesh_shader_->set_bool("useTexture", false);
+    }
     
     glBindVertexArray(vao_);
     
@@ -180,6 +202,8 @@ void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projectio
 }
 
 void MeshRenderer::render_grid(const glm::mat4& view, const glm::mat4& projection) {
+    // Render grid behind everything - disable depth write
+    glDepthMask(GL_FALSE);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     
@@ -194,6 +218,7 @@ void MeshRenderer::render_grid(const glm::mat4& view, const glm::mat4& projectio
     glBindVertexArray(0);
     
     glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
 }
 
 void MeshRenderer::render_normals(const glm::mat4& view, const glm::mat4& projection) {

@@ -32,6 +32,7 @@ public:
     void render();
 
 private:
+    void render_title_bar();
     void render_menu_bar();
     void render_status_bar();
     void render_dockspace();
@@ -42,6 +43,13 @@ private:
 
     void open_addon_dialog();
     void open_addons_folder_dialog();
+    
+    // Title bar state
+    bool is_dragging_title_ = false;
+    double drag_start_x_ = 0;
+    double drag_start_y_ = 0;
+    int window_start_x_ = 0;
+    int window_start_y_ = 0;
 
     // Panels
     std::unique_ptr<AddonBrowser> addon_browser_;

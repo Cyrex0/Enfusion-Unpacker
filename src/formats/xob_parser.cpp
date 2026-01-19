@@ -352,26 +352,82 @@ static bool parse_mesh_from_region(
     return !mesh.vertices.empty() && !mesh.indices.empty();
 }
 
+/**
+ * Extract materials from HEAD chunk
+ * Materials are stored with GUID pattern {16 hex chars} followed by path
+ */
+static std::vector<XobMaterial> extract_materials_from_head(const uint8_t* data, size_t size) {
+    std::vector<XobMaterial> materials;
+    
+    // Look for pattern: '{' followed by 16 hex chars followed by '}'
+    // Then the path follows until null terminator
+    for (size_t i = 0; i + 20 < size; i++) {
+        if (data[i] == '{') {
+            // Check if next 16 chars are hex
+            bool is_guid = true;
+            for (size_t j = 1; j <= 16 && is_guid; j++) {
+                char c = static_cast<char>(data[i + j]);
+                is_guid = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+            }
+            
+            if (is_guid && data[i + 17] == '}') {
+                // Found a GUID, extract path after it
+                size_t path_start = i + 18;
+                size_t path_end = path_start;
+                while (path_end < size && data[path_end] != '\0' && data[path_end] >= 32) {
+                    path_end++;
+                }
+                
+                if (path_end > path_start) {
+                    std::string path(reinterpret_cast<const char*>(data + path_start), path_end - path_start);
+                    
+                    // Extract material name from path
+                    std::string name = path;
+                    size_t last_slash = name.rfind('/');
+                    if (last_slash != std::string::npos) {
+                        name = name.substr(last_slash + 1);
+                    }
+                    // Remove extensions
+                    size_t ext_pos = name.rfind(".emat");
+                    if (ext_pos != std::string::npos) name = name.substr(0, ext_pos);
+                    ext_pos = name.rfind(".gamemat");
+                    if (ext_pos != std::string::npos) name = name.substr(0, ext_pos);
+                    
+                    XobMaterial mat;
+                    mat.name = name;
+                    mat.diffuse_texture = path;
+                    materials.push_back(mat);
+                    
+                    std::cerr << "[XOB] Found material: " << name << " path=" << path << "\n";
+                    
+                    i = path_end - 1; // Skip past this material
+                }
+            }
+        }
+    }
+    
+    return materials;
+}
+
 XobParser::XobParser(std::span<const uint8_t> data) : data_(data) {}
 
 std::optional<std::span<const uint8_t>> XobParser::find_chunk(const uint8_t* chunk_id) const {
     if (data_.size() < 12) return std::nullopt;
     
-    // Skip FORM header (4 bytes magic + 4 bytes size + 4 bytes type)
-    size_t pos = 12;
-    
-    while (pos + 8 <= data_.size()) {
-        const uint8_t* chunk_magic = data_.data() + pos;
-        uint32_t chunk_size = read_u32_be(data_.data() + pos + 4);
-        
-        if (std::memcmp(chunk_magic, chunk_id, 4) == 0) {
-            if (pos + 8 + chunk_size <= data_.size()) {
+    // Simple search for chunk magic (like Python does with data.find(b'LODS'))
+    // This is more robust than IFF iteration which can fail due to alignment issues
+    for (size_t pos = 12; pos + 8 <= data_.size(); pos++) {
+        if (std::memcmp(data_.data() + pos, chunk_id, 4) == 0) {
+            uint32_t chunk_size = read_u32_be(data_.data() + pos + 4);
+            
+            // Sanity check
+            if (chunk_size > 0 && chunk_size < 100000000 && pos + 8 + chunk_size <= data_.size()) {
+                std::cerr << "[XOB] Found chunk '" << (char)chunk_id[0] << (char)chunk_id[1] 
+                          << (char)chunk_id[2] << (char)chunk_id[3] << "' at pos=" << pos 
+                          << " size=" << chunk_size << "\n";
                 return data_.subspan(pos + 8, chunk_size);
             }
         }
-        
-        pos += 8 + chunk_size;
-        if (chunk_size % 2) pos++; // IFF alignment
     }
     
     return std::nullopt;
@@ -399,6 +455,9 @@ std::optional<XobMesh> XobParser::parse(uint32_t target_lod) {
     
     auto head_data = *head_chunk;
     std::cerr << "[XOB] HEAD chunk size=" << head_data.size() << "\n";
+    
+    // Extract materials from HEAD chunk
+    materials_ = extract_materials_from_head(head_data.data(), head_data.size());
     
     // Parse LZO4 descriptors from HEAD chunk
     auto descriptors = parse_lzo4_descriptors(head_data.data(), head_data.size());
@@ -469,6 +528,9 @@ std::optional<XobMesh> XobParser::parse(uint32_t target_lod) {
     lod_data.index_count = static_cast<uint32_t>(mesh.indices.size());
     lod_data.indices = mesh.indices;
     mesh.lods.push_back(lod_data);
+    
+    // Copy materials to mesh
+    mesh.materials = materials_;
     
     return mesh;
 }

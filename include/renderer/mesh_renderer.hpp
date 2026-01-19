@@ -23,6 +23,7 @@ public:
     void cleanup();
 
     void set_mesh(const XobMesh* mesh);
+    void set_texture(uint32_t texture_id) { diffuse_texture_ = texture_id; }
     void render(const glm::mat4& view, const glm::mat4& projection);
 
     // Render option setters
@@ -69,6 +70,9 @@ private:
     // Shaders
     std::unique_ptr<Shader> mesh_shader_;
     std::unique_ptr<Shader> grid_shader_;
+    
+    // Textures
+    uint32_t diffuse_texture_ = 0;
 };
 
 } // namespace enfusion
