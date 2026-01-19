@@ -6,12 +6,27 @@
 
 #ifdef _WIN32
 #include <Windows.h>
+#include <io.h>
+#include <fcntl.h>
+#include <cstdio>
+#include <iostream>
 #endif
 
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
     // Enable high DPI awareness
     SetProcessDPIAware();
+    
+    // Allocate console for debug output
+    if (AllocConsole()) {
+        FILE* fp;
+        freopen_s(&fp, "CONOUT$", "w", stdout);
+        freopen_s(&fp, "CONOUT$", "w", stderr);
+        freopen_s(&fp, "CONIN$", "r", stdin);
+        std::cout.clear();
+        std::cerr.clear();
+        std::cin.clear();
+    }
 #endif
     
     auto& app = enfusion::App::instance();

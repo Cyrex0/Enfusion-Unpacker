@@ -57,9 +57,12 @@ static std::vector<uint8_t> decompress_lz4_chained(const uint8_t* data, size_t s
     std::vector<uint8_t> result;
     result.reserve(size * 4);
 
+    std::cerr << "[XOB] Decompressing LZ4 chained, input size=" << size << "\n";
+
     size_t pos = 0;
     std::vector<uint8_t> prev_dict;
     prev_dict.reserve(65536);
+    int block_count = 0;
 
     while (pos < size) {
         if (pos + 4 > size) break;
@@ -97,7 +100,10 @@ static std::vector<uint8_t> decompress_lz4_chained(const uint8_t* data, size_t s
         }
 
         pos += block_size;
-        if (dec_size <= 0) break;
+        if (dec_size <= 0) {
+            std::cerr << "[XOB] Block " << block_count << " decompression failed, dec_size=" << dec_size << "\n";
+            break;
+        }
 
         decompressed.resize(dec_size);
         result.insert(result.end(), decompressed.begin(), decompressed.end());
@@ -109,9 +115,11 @@ static std::vector<uint8_t> decompress_lz4_chained(const uint8_t* data, size_t s
             prev_dict.assign(decompressed.end() - 65536, decompressed.end());
         }
         
+        block_count++;
         // Do NOT break on has_more=false - continue until end of data
     }
 
+    std::cerr << "[XOB] Decompressed " << block_count << " blocks, total output=" << result.size() << "\n";
     return result;
 }
 
@@ -119,26 +127,20 @@ static std::vector<uint8_t> decompress_lz4_chained(const uint8_t* data, size_t s
  * LZO4 Descriptor structure (116 bytes each)
  * Based on Python parse_lzo4_descriptors()
  * 
- * IMPORTANT: LZO4 Descriptor layout:
- * - +0:  Padding/count (4 bytes)
- * - +4:  "LZO4" magic (4 bytes)
- * - +8:  Compression mode (4 bytes)
- * - +12: Reserved (4 bytes)
- * - +16: Morph target count / format version (4 bytes)
- * - +20: Reserved (4 bytes)
- * - +24: Compressed size (4 bytes)
- * - +28: Decompressed size (4 bytes) 
- * - +32: Format flags (4 bytes) - upper byte bit 4 determines position stride
- * - +76: Triangle count (2 bytes)
- * - +78: Vertex count (2 bytes)
+ * IMPORTANT: LZO4 Descriptor layout (all offsets from "LZO4" marker):
+ * - +0:   "LZO4" magic (4 bytes)
+ * - +28:  Decompressed size (4 bytes) 
+ * - +32:  Format flags (4 bytes) - upper byte bit 4 determines position stride
+ * - +76:  Triangle count (2 bytes)
+ * - +78:  Vertex count (2 bytes)
  * 
  * Position stride: 16 if upper byte bit 4 set, else 12
  */
 struct LzoDescriptorInternal {
-    uint32_t decomp_size;      // +28
-    uint32_t format_flags;     // +32 (full 32-bit value)
-    uint16_t triangle_count;   // +76
-    uint16_t vertex_count;     // +78
+    uint32_t decomp_size;      // +28 from LZO4
+    uint32_t format_flags;     // +32 from LZO4 (full 32-bit value)
+    uint16_t triangle_count;   // +76 from LZO4
+    uint16_t vertex_count;     // +78 from LZO4
     int position_stride;       // Calculated: 12 or 16 bytes
     uint8_t flag_byte;         // Low byte of format_flags
     bool has_normals;
@@ -151,9 +153,11 @@ struct LzoDescriptorInternal {
 static std::vector<LzoDescriptorInternal> parse_lzo4_descriptors(const uint8_t* data, size_t size) {
     std::vector<LzoDescriptorInternal> descriptors;
     
+    std::cerr << "[XOB] Parsing LZO4 descriptors from HEAD chunk, size=" << size << "\n";
+    
     // Search for LZO4 markers
     size_t pos = 0;
-    while (pos + 116 <= size) {
+    while (pos + 4 <= size) {
         // Look for LZO4 marker
         size_t found = SIZE_MAX;
         for (size_t i = pos; i + 4 <= size; i++) {
@@ -166,21 +170,20 @@ static std::vector<LzoDescriptorInternal> parse_lzo4_descriptors(const uint8_t* 
         
         if (found == SIZE_MAX) break;
         
-        // Descriptor starts 4 bytes before LZO4 marker (at the padding/count field)
-        size_t desc_start = (found >= 4) ? found - 4 : 0;
-        
-        // Ensure we have enough data for full descriptor (116 bytes from LZO4 marker)
-        if (found + 116 > size) break;
-        
-        const uint8_t* desc = data + found - 4;
+        // Ensure we have enough data (need at least 80 bytes from LZO4 marker)
+        if (found + 80 > size) break;
         
         LzoDescriptorInternal d;
         
-        // Decompressed size at offset +28 from descriptor start (or +24 from LZO4)
-        d.decomp_size = read_u32_le(data + found + 24);  // +28 from desc_start
+        // All offsets are from the LZO4 marker position
+        // Python: desc = head_data[idx:idx+116] where idx is position of "LZO4"
+        // So desc[28:32] means offset 28 from LZO4, etc.
         
-        // Format flags at offset +32 from descriptor start (or +28 from LZO4)
-        d.format_flags = read_u32_le(data + found + 28);  // +32 from desc_start
+        // Decompressed size at offset +28 from LZO4
+        d.decomp_size = read_u32_le(data + found + 28);
+        
+        // Format flags at offset +32 from LZO4
+        d.format_flags = read_u32_le(data + found + 32);
         d.flag_byte = d.format_flags & 0xFF;
         
         // Parse attribute flags from low byte
@@ -190,10 +193,9 @@ static std::vector<LzoDescriptorInternal> parse_lzo4_descriptors(const uint8_t* 
         d.has_skinning = (d.flag_byte & 0x10) != 0;
         d.has_extra_normals = (d.flag_byte & 0x20) != 0;
         
-        // Triangle count at +76, vertex count at +78 from descriptor start
-        // That's +72 and +74 from LZO4 marker
-        d.triangle_count = read_u16_le(data + found + 72);  // +76 from desc_start
-        d.vertex_count = read_u16_le(data + found + 74);    // +78 from desc_start
+        // From xob_to_obj.py: triangle_count at +76, vertex_count at +78 from LZO4
+        d.triangle_count = read_u16_le(data + found + 76);
+        d.vertex_count = read_u16_le(data + found + 78);
         
         // Position stride: determined by bit 4 of upper byte of format_flags
         // Upper byte pattern: 0x0F, 0x2F, 0x8F, 0xAF → 12-byte stride (XYZ only)
@@ -201,10 +203,18 @@ static std::vector<LzoDescriptorInternal> parse_lzo4_descriptors(const uint8_t* 
         uint8_t upper_byte = (d.format_flags >> 24) & 0xFF;
         d.position_stride = (upper_byte & 0x10) ? 16 : 12;
         
+        std::cerr << "[XOB] LOD " << descriptors.size() << ": offset=" << found 
+                  << " decomp=" << d.decomp_size
+                  << " tris=" << d.triangle_count 
+                  << " verts=" << d.vertex_count 
+                  << " stride=" << d.position_stride
+                  << " flags=0x" << std::hex << d.format_flags << std::dec << "\n";
+        
         descriptors.push_back(d);
         pos = found + 4;
     }
     
+    std::cerr << "[XOB] Found " << descriptors.size() << " LOD descriptors\n";
     return descriptors;
 }
 
@@ -242,7 +252,12 @@ static bool parse_mesh_from_region(
     int position_stride,
     XobMesh& mesh
 ) {
+    std::cerr << "[XOB] parse_mesh_from_region: region_size=" << region.size() 
+              << " verts=" << vertex_count << " tris=" << triangle_count 
+              << " stride=" << position_stride << "\n";
+    
     if (vertex_count == 0 || triangle_count == 0 || region.empty()) {
+        std::cerr << "[XOB] Invalid parameters\n";
         return false;
     }
     
@@ -252,7 +267,13 @@ static bool parse_mesh_from_region(
     // CRITICAL: TWO index arrays before positions (Python: pos_offset = idx_size * 2)
     size_t pos_offset = idx_array_size * 2;
     
-    if (pos_offset >= region.size()) return false;
+    std::cerr << "[XOB] index_count=" << index_count << " idx_array_size=" << idx_array_size 
+              << " pos_offset=" << pos_offset << "\n";
+    
+    if (pos_offset >= region.size()) {
+        std::cerr << "[XOB] pos_offset >= region.size()\n";
+        return false;
+    }
     
     // Extract indices (first array only - the actual vertex indices)
     mesh.indices.clear();
@@ -267,6 +288,7 @@ static bool parse_mesh_from_region(
     for (uint32_t idx : mesh.indices) {
         if (idx > max_idx) max_idx = idx;
     }
+    std::cerr << "[XOB] max_idx=" << max_idx << "\n";
     if (max_idx >= vertex_count) {
         // Bad indices - clamp them
         for (uint32_t& idx : mesh.indices) {
@@ -370,13 +392,20 @@ std::optional<XobMesh> XobParser::parse(uint32_t target_lod) {
     // Find HEAD chunk
     static constexpr uint8_t HEAD_ID[4] = {'H', 'E', 'A', 'D'};
     auto head_chunk = find_chunk(HEAD_ID);
-    if (!head_chunk) return std::nullopt;
+    if (!head_chunk) {
+        std::cerr << "[XOB] Failed to find HEAD chunk\n";
+        return std::nullopt;
+    }
     
     auto head_data = *head_chunk;
+    std::cerr << "[XOB] HEAD chunk size=" << head_data.size() << "\n";
     
     // Parse LZO4 descriptors from HEAD chunk
     auto descriptors = parse_lzo4_descriptors(head_data.data(), head_data.size());
-    if (descriptors.empty()) return std::nullopt;
+    if (descriptors.empty()) {
+        std::cerr << "[XOB] No LZO4 descriptors found\n";
+        return std::nullopt;
+    }
     
     // Validate LOD index
     if (target_lod >= descriptors.size()) {
@@ -386,28 +415,44 @@ std::optional<XobMesh> XobParser::parse(uint32_t target_lod) {
     // Get descriptor for target LOD
     const auto& desc = descriptors[target_lod];
     if (desc.vertex_count == 0 || desc.triangle_count == 0) {
+        std::cerr << "[XOB] Invalid descriptor: vertex_count=" << desc.vertex_count 
+                  << " triangle_count=" << desc.triangle_count << "\n";
         return std::nullopt;
     }
     
     // Find LODS chunk
     static constexpr uint8_t LODS_ID[4] = {'L', 'O', 'D', 'S'};
     auto lods_chunk = find_chunk(LODS_ID);
-    if (!lods_chunk) return std::nullopt;
+    if (!lods_chunk) {
+        std::cerr << "[XOB] Failed to find LODS chunk\n";
+        return std::nullopt;
+    }
+    std::cerr << "[XOB] LODS chunk size=" << lods_chunk->size() << "\n";
     
     // Decompress LODS data with dictionary chaining
     auto decompressed = decompress_lz4_chained(lods_chunk->data(), lods_chunk->size());
-    if (decompressed.empty()) return std::nullopt;
+    if (decompressed.empty()) {
+        std::cerr << "[XOB] Decompression failed\n";
+        return std::nullopt;
+    }
     
     // Extract LOD region (REVERSE order - LOD0 at END)
     auto region = extract_lod_region_internal(decompressed, descriptors, target_lod);
-    if (region.empty()) return std::nullopt;
+    if (region.empty()) {
+        std::cerr << "[XOB] Failed to extract LOD region\n";
+        return std::nullopt;
+    }
+    std::cerr << "[XOB] LOD region size=" << region.size() << "\n";
     
     // Parse mesh from region
     XobMesh mesh;
     if (!parse_mesh_from_region(region, desc.vertex_count, desc.triangle_count, 
                                  desc.position_stride, mesh)) {
+        std::cerr << "[XOB] Failed to parse mesh from region\n";
         return std::nullopt;
     }
+    std::cerr << "[XOB] Mesh parsed: verts=" << mesh.vertices.size() 
+              << " indices=" << mesh.indices.size() << "\n";
     
     // Calculate bounds
     mesh.bounds_min = glm::vec3(FLT_MAX);
