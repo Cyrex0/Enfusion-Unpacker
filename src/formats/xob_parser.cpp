@@ -20,6 +20,48 @@
 
 namespace enfusion {
 
+// ============================================================================
+// XOB Format Constants
+// ============================================================================
+
+// LZ4 block decompression parameters
+constexpr size_t LZ4_MAX_BLOCK_SIZE = 0x20000;       // 128KB maximum compressed block
+constexpr size_t LZ4_DICT_SIZE = 65536;              // 64KB dictionary window
+
+// LZO4 Descriptor offsets (from "LZO4" marker)
+// See xob_to_obj.py parse_lzo4_descriptors()
+constexpr size_t LZO4_MARKER_SIZE = 4;                // "LZO4" magic (4 bytes)
+constexpr size_t LZO4_DESCRIPTOR_SIZE = 116;          // Total descriptor size in bytes
+constexpr size_t LZO4_DECOMP_SIZE_OFFSET = 28;        // Decompressed size (uint32_t)
+constexpr size_t LZO4_FORMAT_FLAGS_OFFSET = 32;       // Format flags (uint32_t)
+constexpr size_t LZO4_TRIANGLE_COUNT_OFFSET = 76;     // Triangle count (uint16_t)
+constexpr size_t LZO4_VERTEX_COUNT_OFFSET = 78;       // Vertex count (uint16_t)
+constexpr size_t LZO4_MIN_REQUIRED_BYTES = 80;        // Minimum bytes needed from marker
+
+// Format flag bit masks (applied to low byte of format_flags)
+constexpr uint8_t XOB_FLAG_NORMALS = 0x02;           // Has normal vectors
+constexpr uint8_t XOB_FLAG_UVS = 0x04;               // Has UV coordinates
+constexpr uint8_t XOB_FLAG_TANGENTS = 0x08;          // Has tangent vectors
+constexpr uint8_t XOB_FLAG_SKINNING = 0x10;          // Has bone weights/indices
+constexpr uint8_t XOB_FLAG_EXTRA_NORMALS = 0x20;     // Has additional normal data
+
+// Position stride determination (bit 4 of upper byte of format_flags)
+// Upper byte pattern: 0x0F, 0x2F, 0x8F, 0xAF → 12-byte stride (XYZ only)
+// Upper byte pattern: 0x1F, 0x3F, 0x9F, 0xBF → 16-byte stride (XYZW, W=0)
+constexpr uint8_t XOB_STRIDE_16_BIT = 0x10;           // Bit that indicates 16-byte stride
+constexpr int XOB_POSITION_STRIDE_12 = 12;            // XYZ floats (3 * 4 bytes)
+constexpr int XOB_POSITION_STRIDE_16 = 16;            // XYZW floats (4 * 4 bytes, W unused)
+
+// Vertex attribute sizes in bytes
+constexpr size_t XOB_NORMAL_SIZE = 4;                 // Compressed normal (4 bytes)
+constexpr size_t XOB_UV_SIZE = 4;                     // Half-float UV (4 bytes)
+constexpr size_t XOB_TANGENT_SIZE = 4;                // Compressed tangent (4 bytes)
+constexpr size_t XOB_EXTRA_SIZE = 8;                  // Extra data (8 bytes)
+
+// Index buffer
+constexpr size_t XOB_INDEX_SIZE = 2;                  // 16-bit indices
+constexpr size_t XOB_INDEX_ARRAYS = 2;                // Two index arrays before positions
+
 // Helper to read big-endian uint32 (IFF chunk sizes)
 static inline uint32_t read_u32_be(const uint8_t* p) {
     return (static_cast<uint32_t>(p[0]) << 24) |
@@ -61,7 +103,7 @@ static std::vector<uint8_t> decompress_lz4_chained(const uint8_t* data, size_t s
 
     size_t pos = 0;
     std::vector<uint8_t> prev_dict;
-    prev_dict.reserve(65536);
+    prev_dict.reserve(LZ4_DICT_SIZE);
     int block_count = 0;
 
     while (pos < size) {
@@ -75,10 +117,10 @@ static std::vector<uint8_t> decompress_lz4_chained(const uint8_t* data, size_t s
         // The dictionary MUST be maintained across ALL blocks without resetting
 
         if (block_size == 0) break;
-        if (block_size > 0x20000) break;
+        if (block_size > LZ4_MAX_BLOCK_SIZE) break;
         if (pos + block_size > size) break;
 
-        std::vector<uint8_t> decompressed(65536);
+        std::vector<uint8_t> decompressed(LZ4_DICT_SIZE);
         int dec_size;
 
         if (!prev_dict.empty()) {
@@ -86,7 +128,7 @@ static std::vector<uint8_t> decompress_lz4_chained(const uint8_t* data, size_t s
                 reinterpret_cast<const char*>(data + pos),
                 reinterpret_cast<char*>(decompressed.data()),
                 static_cast<int>(block_size),
-                65536,
+                LZ4_DICT_SIZE,
                 reinterpret_cast<const char*>(prev_dict.data()),
                 static_cast<int>(prev_dict.size())
             );
@@ -95,7 +137,7 @@ static std::vector<uint8_t> decompress_lz4_chained(const uint8_t* data, size_t s
                 reinterpret_cast<const char*>(data + pos),
                 reinterpret_cast<char*>(decompressed.data()),
                 static_cast<int>(block_size),
-                65536
+                LZ4_DICT_SIZE
             );
         }
 
@@ -109,10 +151,10 @@ static std::vector<uint8_t> decompress_lz4_chained(const uint8_t* data, size_t s
         result.insert(result.end(), decompressed.begin(), decompressed.end());
         
         // Use this block as dictionary for next (keep last 64KB max)
-        if (decompressed.size() <= 65536) {
+        if (decompressed.size() <= LZ4_DICT_SIZE) {
             prev_dict = std::move(decompressed);
         } else {
-            prev_dict.assign(decompressed.end() - 65536, decompressed.end());
+            prev_dict.assign(decompressed.end() - LZ4_DICT_SIZE, decompressed.end());
         }
         
         block_count++;
@@ -137,11 +179,11 @@ static std::vector<uint8_t> decompress_lz4_chained(const uint8_t* data, size_t s
  * Position stride: 16 if upper byte bit 4 set, else 12
  */
 struct LzoDescriptorInternal {
-    uint32_t decomp_size;      // +28 from LZO4
-    uint32_t format_flags;     // +32 from LZO4 (full 32-bit value)
-    uint16_t triangle_count;   // +76 from LZO4
-    uint16_t vertex_count;     // +78 from LZO4
-    int position_stride;       // Calculated: 12 or 16 bytes
+    uint32_t decomp_size;      // +LZO4_DECOMP_SIZE_OFFSET from LZO4
+    uint32_t format_flags;     // +LZO4_FORMAT_FLAGS_OFFSET from LZO4 (full 32-bit value)
+    uint16_t triangle_count;   // +LZO4_TRIANGLE_COUNT_OFFSET from LZO4
+    uint16_t vertex_count;     // +LZO4_VERTEX_COUNT_OFFSET from LZO4
+    int position_stride;       // Calculated: XOB_POSITION_STRIDE_12 or _16 bytes
     uint8_t flag_byte;         // Low byte of format_flags
     bool has_normals;
     bool has_uvs;
@@ -157,10 +199,10 @@ static std::vector<LzoDescriptorInternal> parse_lzo4_descriptors(const uint8_t* 
     
     // Search for LZO4 markers
     size_t pos = 0;
-    while (pos + 4 <= size) {
+    while (pos + LZO4_MARKER_SIZE <= size) {
         // Look for LZO4 marker
         size_t found = SIZE_MAX;
-        for (size_t i = pos; i + 4 <= size; i++) {
+        for (size_t i = pos; i + LZO4_MARKER_SIZE <= size; i++) {
             if (data[i] == 'L' && data[i+1] == 'Z' && 
                 data[i+2] == 'O' && data[i+3] == '4') {
                 found = i;
@@ -170,8 +212,8 @@ static std::vector<LzoDescriptorInternal> parse_lzo4_descriptors(const uint8_t* 
         
         if (found == SIZE_MAX) break;
         
-        // Ensure we have enough data (need at least 80 bytes from LZO4 marker)
-        if (found + 80 > size) break;
+        // Ensure we have enough data for all required fields
+        if (found + LZO4_MIN_REQUIRED_BYTES > size) break;
         
         LzoDescriptorInternal d;
         
@@ -180,28 +222,26 @@ static std::vector<LzoDescriptorInternal> parse_lzo4_descriptors(const uint8_t* 
         // So desc[28:32] means offset 28 from LZO4, etc.
         
         // Decompressed size at offset +28 from LZO4
-        d.decomp_size = read_u32_le(data + found + 28);
+        d.decomp_size = read_u32_le(data + found + LZO4_DECOMP_SIZE_OFFSET);
         
         // Format flags at offset +32 from LZO4
-        d.format_flags = read_u32_le(data + found + 32);
+        d.format_flags = read_u32_le(data + found + LZO4_FORMAT_FLAGS_OFFSET);
         d.flag_byte = d.format_flags & 0xFF;
         
-        // Parse attribute flags from low byte
-        d.has_normals = (d.flag_byte & 0x02) != 0;
-        d.has_uvs = (d.flag_byte & 0x04) != 0;
-        d.has_tangents = (d.flag_byte & 0x08) != 0;
-        d.has_skinning = (d.flag_byte & 0x10) != 0;
-        d.has_extra_normals = (d.flag_byte & 0x20) != 0;
+        // Parse attribute flags from low byte using documented bit masks
+        d.has_normals = (d.flag_byte & XOB_FLAG_NORMALS) != 0;
+        d.has_uvs = (d.flag_byte & XOB_FLAG_UVS) != 0;
+        d.has_tangents = (d.flag_byte & XOB_FLAG_TANGENTS) != 0;
+        d.has_skinning = (d.flag_byte & XOB_FLAG_SKINNING) != 0;
+        d.has_extra_normals = (d.flag_byte & XOB_FLAG_EXTRA_NORMALS) != 0;
         
-        // From xob_to_obj.py: triangle_count at +76, vertex_count at +78 from LZO4
-        d.triangle_count = read_u16_le(data + found + 76);
-        d.vertex_count = read_u16_le(data + found + 78);
+        // Triangle and vertex counts from LZO4 descriptor
+        d.triangle_count = read_u16_le(data + found + LZO4_TRIANGLE_COUNT_OFFSET);
+        d.vertex_count = read_u16_le(data + found + LZO4_VERTEX_COUNT_OFFSET);
         
         // Position stride: determined by bit 4 of upper byte of format_flags
-        // Upper byte pattern: 0x0F, 0x2F, 0x8F, 0xAF → 12-byte stride (XYZ only)
-        // Upper byte pattern: 0x1F, 0x3F, 0x9F, 0xBF → 16-byte stride (XYZW, W=0)
         uint8_t upper_byte = (d.format_flags >> 24) & 0xFF;
-        d.position_stride = (upper_byte & 0x10) ? 16 : 12;
+        d.position_stride = (upper_byte & XOB_STRIDE_16_BIT) ? XOB_POSITION_STRIDE_16 : XOB_POSITION_STRIDE_12;
         
         std::cerr << "[XOB] LOD " << descriptors.size() << ": offset=" << found 
                   << " decomp=" << d.decomp_size
@@ -264,10 +304,10 @@ static bool parse_mesh_from_region(
     }
     
     uint32_t index_count = static_cast<uint32_t>(triangle_count) * 3;
-    size_t idx_array_size = index_count * 2; // 2 bytes per index
+    size_t idx_array_size = index_count * XOB_INDEX_SIZE; // XOB_INDEX_SIZE bytes per 16-bit index
     
-    // CRITICAL: TWO index arrays before positions (Python: pos_offset = idx_size * 2)
-    size_t pos_offset = idx_array_size * 2;
+    // CRITICAL: Two index arrays before positions (Python: pos_offset = idx_size * 2)
+    size_t pos_offset = idx_array_size * XOB_INDEX_ARRAYS;
     
     std::cerr << "[XOB] index_count=" << index_count << " idx_array_size=" << idx_array_size 
               << " pos_offset=" << pos_offset << "\n";
@@ -323,13 +363,13 @@ static bool parse_mesh_from_region(
         mesh.vertices.push_back(vert);
     }
     
-    // Normals start after positions (4 bytes per vertex - packed signed bytes)
+    // Normals start after positions (XOB_NORMAL_SIZE bytes per vertex - packed signed bytes)
     size_t normal_offset = pos_offset + vertex_count * position_stride;
     std::cerr << "[XOB] normal_offset=" << normal_offset << "\n";
     
     for (uint32_t i = 0; i < vertex_count && i < mesh.vertices.size(); i++) {
-        size_t off = normal_offset + i * 4;
-        if (off + 4 > region.size()) break;
+        size_t off = normal_offset + i * XOB_NORMAL_SIZE;
+        if (off + XOB_NORMAL_SIZE > region.size()) break;
         
         int8_t nx = static_cast<int8_t>(region[off]);
         int8_t ny = static_cast<int8_t>(region[off + 1]);
@@ -355,14 +395,14 @@ static bool parse_mesh_from_region(
     // UVs come directly after normals (FIXED layout: pos -> normals(4) -> UVs(8) -> tangent -> extra)
     // UVs are 8 bytes per vertex: 4 bytes for UV0 (diffuse), 4 bytes for UV1 (lightmap/unused)
     // We only need UV0 which is the first 4 bytes
-    size_t uv_offset = normal_offset + vertex_count * 4;
-    size_t uv_stride = 8;  // Two UV channels: UV0 (4 bytes) + UV1 (4 bytes)
-    std::cerr << "[XOB] uv_offset=" << uv_offset << " uv_stride=" << uv_stride << " region_size=" << region.size() << "\n";
+    constexpr size_t UV_STRIDE = XOB_UV_SIZE * 2;  // Two UV channels: UV0 (4 bytes) + UV1 (4 bytes)
+    size_t uv_offset = normal_offset + vertex_count * XOB_NORMAL_SIZE;
+    std::cerr << "[XOB] uv_offset=" << uv_offset << " uv_stride=" << UV_STRIDE << " region_size=" << region.size() << "\n";
     
     size_t valid_uvs = 0;
     for (uint32_t i = 0; i < vertex_count && i < mesh.vertices.size(); i++) {
-        size_t off = uv_offset + i * uv_stride;  // Use 8-byte stride
-        if (off + 4 > region.size()) break;
+        size_t off = uv_offset + i * UV_STRIDE;  // Use UV_STRIDE for dual UV channels
+        if (off + XOB_UV_SIZE > region.size()) break;
         
         uint16_t u_raw = read_u16_le(region.data() + off);
         uint16_t v_raw = read_u16_le(region.data() + off + 2);

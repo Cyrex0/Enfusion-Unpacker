@@ -31,6 +31,21 @@ MainWindow::MainWindow() {
     export_dialog_ = std::make_unique<ExportDialog>();
     settings_dialog_ = std::make_unique<SettingsDialog>();
 
+    // Initialize addon browser with saved paths
+    auto& settings = App::instance().settings();
+    
+    // First try mods path (workshop addons), then game install path, then arma_addons_path
+    if (!settings.mods_install_path.empty() && std::filesystem::exists(settings.mods_install_path)) {
+        addon_browser_->set_addons_path(settings.mods_install_path);
+    } else if (!settings.game_install_path.empty()) {
+        std::filesystem::path addons_path = settings.game_install_path / "Addons";
+        if (std::filesystem::exists(addons_path)) {
+            addon_browser_->set_addons_path(addons_path);
+        }
+    } else if (!settings.arma_addons_path.empty() && std::filesystem::exists(settings.arma_addons_path)) {
+        addon_browser_->set_addons_path(settings.arma_addons_path);
+    }
+
     addon_browser_->on_addon_selected = [this](const std::filesystem::path& path) {
         current_addon_path_ = path;
         file_browser_->load(path);
@@ -336,6 +351,28 @@ void MainWindow::render_dialogs() {
 
     if (show_about_) {
         render_about_dialog();
+    }
+    
+    // Loading overlay
+    if (App::instance().is_loading()) {
+        ImGui::OpenPopup("Loading...");
+        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        
+        if (ImGui::BeginPopupModal("Loading...", nullptr, 
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+            
+            ImGui::Text("%s", App::instance().loading_message().c_str());
+            ImGui::Spacing();
+            
+            // Animated spinner
+            float time = static_cast<float>(ImGui::GetTime());
+            int dots = static_cast<int>(time * 2.0f) % 4;
+            std::string spinner = std::string(dots, '.') + std::string(3 - dots, ' ');
+            ImGui::Text("Please wait%s", spinner.c_str());
+            
+            ImGui::EndPopup();
+        }
     }
 }
 

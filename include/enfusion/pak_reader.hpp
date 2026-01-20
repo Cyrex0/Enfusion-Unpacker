@@ -71,7 +71,8 @@ private:
     bool parse_form_header();
     bool parse_chunks();
     void parse_file_entries(std::istream& stream, uint32_t chunk_size);
-    void parse_entry_recursive(std::istream& stream, const std::string& parent_path, size_t end_pos);
+    bool parse_single_entry(std::istream& stream, const std::string& parent_path, size_t end_pos);
+    void parse_directory_contents(std::istream& stream, const std::string& dir_path, size_t end_pos, int child_count);
     bool matches_pattern(const std::string& text, const std::string& pattern) const;
     
     // Helper for big-endian reads

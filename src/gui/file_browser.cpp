@@ -5,6 +5,7 @@
 #include "gui/file_browser.hpp"
 #include "gui/widgets.hpp"
 #include "enfusion/addon_extractor.hpp"
+#include "enfusion/pak_manager.hpp"
 
 #include <imgui.h>
 #include <algorithm>
@@ -16,6 +17,9 @@ void FileBrowser::load(const std::filesystem::path& addon_path) {
     entries_.clear();
     tree_root_.children.clear();
     tree_root_.name = addon_path.filename().string();
+    
+    // Register the PAK with PakManager for cross-reference lookups
+    auto& pak_mgr = PakManager::instance();
 
     // Try to load from addon directory (with data.pak, rdb, manifest)
     if (std::filesystem::is_directory(addon_path)) {
@@ -23,6 +27,8 @@ void FileBrowser::load(const std::filesystem::path& addon_path) {
         auto rdb_path = addon_path / "resourceDatabase.rdb";
         
         if (std::filesystem::exists(pak_path) && std::filesystem::exists(rdb_path)) {
+            // Register with PakManager
+            pak_mgr.load_pak(addon_path);
             // Load from addon using AddonExtractor
             load_from_addon(addon_path);
         } else {

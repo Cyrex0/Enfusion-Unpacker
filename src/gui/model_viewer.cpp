@@ -17,8 +17,105 @@
 #include <algorithm>
 #include <iostream>
 #include <map>
+#include <regex>
 
 namespace enfusion {
+
+/**
+ * Parse an .emat file to extract texture paths.
+ * Returns a map of texture type (e.g., "Diffuse", "Normal") to texture path.
+ */
+static std::map<std::string, std::string> parse_emat_textures(const std::vector<uint8_t>& data) {
+    std::map<std::string, std::string> textures;
+    int diffuse_priority = 999;  // Lower = better
+    
+    if (data.empty()) return textures;
+    
+    // Convert to string for searching
+    std::string content(data.begin(), data.end());
+    
+    // Look for .edds paths in the emat file
+    // Pattern: find paths ending in .edds
+    size_t pos = 0;
+    while ((pos = content.find(".edds", pos)) != std::string::npos) {
+        // Search backwards for start of path
+        size_t start = pos;
+        while (start > 0 && content[start - 1] != '\0' && content[start - 1] != '"' && 
+               content[start - 1] != ' ' && content[start - 1] != '\n' && content[start - 1] != '\r' &&
+               static_cast<unsigned char>(content[start - 1]) >= 32) {
+            start--;
+        }
+        
+        std::string path = content.substr(start, pos + 5 - start);
+        
+        // Strip GUID prefix if present (format: {XXXXXXXXXXXXXXXX}path)
+        // GUIDs are 16 hex chars inside curly braces
+        if (path.length() > 18 && path[0] == '{') {
+            size_t close_brace = path.find('}');
+            if (close_brace != std::string::npos && close_brace == 17) {
+                path = path.substr(18);  // Skip {16hexchars}
+            }
+        }
+        
+        // Skip empty paths
+        if (path.empty()) {
+            pos += 5;
+            continue;
+        }
+        
+        // Determine texture type based on suffix
+        std::string path_lower = path;
+        std::transform(path_lower.begin(), path_lower.end(), path_lower.begin(), ::tolower);
+        
+        // Skip non-diffuse textures entirely
+        if (path_lower.find("_global_mask") != std::string::npos ||
+            path_lower.find("_mask") != std::string::npos ||
+            path_lower.find("_vfx") != std::string::npos ||
+            path_lower.find("_ao") != std::string::npos ||
+            path_lower.find("_emissive") != std::string::npos ||
+            path_lower.find("_opacity") != std::string::npos ||
+            path_lower.find("_alpha") != std::string::npos) {
+            pos += 5;
+            continue;
+        }
+        
+        // Normal maps
+        if (path_lower.find("_nmo") != std::string::npos ||
+            path_lower.find("_normal") != std::string::npos ||
+            path_lower.find("_nm") != std::string::npos) {
+            textures["Normal"] = path;
+            pos += 5;
+            continue;
+        }
+        
+        // Specular maps
+        if (path_lower.find("_smdi") != std::string::npos ||
+            path_lower.find("_specular") != std::string::npos) {
+            textures["Specular"] = path;
+            pos += 5;
+            continue;
+        }
+        
+        // Diffuse textures with priority
+        int priority = 999;
+        if (path_lower.find("_bcr") != std::string::npos) priority = 0;
+        else if (path_lower.find("_mcr") != std::string::npos) priority = 1;
+        else if (path_lower.find("_co") != std::string::npos) priority = 2;
+        else if (path_lower.find("_diffuse") != std::string::npos) priority = 3;
+        else if (path_lower.find("_albedo") != std::string::npos) priority = 4;
+        else if (path_lower.find("_color") != std::string::npos) priority = 5;
+        else priority = 10;  // Unknown suffix, low priority
+        
+        if (priority < diffuse_priority) {
+            diffuse_priority = priority;
+            textures["Diffuse"] = path;
+        }
+        
+        pos += 5;
+    }
+    
+    return textures;
+}
 
 
 ModelViewer::ModelViewer()
@@ -46,22 +143,187 @@ void ModelViewer::destroy_textures() {
         diffuse_texture_ = 0;
     }
     
-    // Delete per-material textures
-    for (auto& [idx, tex_id] : material_diffuse_textures_) {
-        if (tex_id != 0) {
-            glDeleteTextures(1, &tex_id);
-        }
-    }
+    // Delete per-material textures (these reference the cache, so just clear the map)
     material_diffuse_textures_.clear();
+    
+    // Clear the texture cache (deletes all cached OpenGL textures)
+    clear_texture_cache();
     
     renderer_->set_texture(0);
     renderer_->clear_material_textures();
 }
 
+void ModelViewer::clear_texture_cache() {
+    for (auto& [path, cached] : texture_cache_) {
+        if (cached.gl_texture_id != 0) {
+            glDeleteTextures(1, &cached.gl_texture_id);
+        }
+    }
+    texture_cache_.clear();
+}
+
+uint32_t ModelViewer::get_cached_texture(const std::string& path) const {
+    std::string key = path;
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    
+    auto it = texture_cache_.find(key);
+    if (it != texture_cache_.end()) {
+        return it->second.gl_texture_id;
+    }
+    return 0;
+}
+
+void ModelViewer::add_texture_to_cache(const std::string& path, uint32_t texture_id, int width, int height) {
+    std::string key = path;
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    
+    CachedTexture cached;
+    cached.gl_texture_id = texture_id;
+    cached.width = width;
+    cached.height = height;
+    cached.ref_count = 1;
+    
+    texture_cache_[key] = cached;
+}
+
+std::string ModelViewer::find_best_texture_match(const std::string& material_name,
+                                                  const std::string& material_dir) const {
+    // Extract base name from material (remove extension)
+    std::string mat_base = material_name;
+    size_t ext_pos = mat_base.rfind('.');
+    if (ext_pos != std::string::npos) {
+        mat_base = mat_base.substr(0, ext_pos);
+    }
+    std::string mat_base_lower = mat_base;
+    std::transform(mat_base_lower.begin(), mat_base_lower.end(), mat_base_lower.begin(), ::tolower);
+    
+    // Diffuse texture suffixes in priority order
+    static const std::vector<std::string> diffuse_suffixes = {
+        "_bcr", "_mcr", "_co", "_diffuse", "_diff", "_d", "_albedo", "_color", "_basecolor", ""
+    };
+    
+    // Suffixes to skip (non-diffuse)
+    static const std::vector<std::string> skip_suffixes = {
+        "_global_mask", "_mask", "_nmo", "_normal", "_nm", "_n",
+        "_smdi", "_specular", "_spec", "_ao", "_occlusion",
+        "_roughness", "_metallic", "_height",
+        "_emissive", "_opacity", "_alpha", "_vfx"
+    };
+    
+    std::string best_match;
+    int best_priority = 999;
+    bool best_in_same_dir = false;  // Prefer textures in same/nearby directory
+    
+    // Get material directory for locality matching
+    std::string mat_dir_lower = material_dir;
+    std::transform(mat_dir_lower.begin(), mat_dir_lower.end(), mat_dir_lower.begin(), ::tolower);
+    
+    for (const auto& tex : available_textures_) {
+        std::string tex_lower = tex;
+        std::transform(tex_lower.begin(), tex_lower.end(), tex_lower.begin(), ::tolower);
+        
+        // Only consider .edds files
+        if (tex_lower.find(".edds") == std::string::npos) continue;
+        
+        // Extract filename without path
+        std::string tex_filename = tex;
+        size_t slash_pos = tex.rfind('/');
+        if (slash_pos != std::string::npos) {
+            tex_filename = tex.substr(slash_pos + 1);
+        }
+        
+        // Extract base name (remove extension)
+        std::string tex_base = tex_filename;
+        size_t edds_pos = tex_base.rfind(".edds");
+        if (edds_pos != std::string::npos) {
+            tex_base = tex_base.substr(0, edds_pos);
+        }
+        std::string tex_base_lower = tex_base;
+        std::transform(tex_base_lower.begin(), tex_base_lower.end(), tex_base_lower.begin(), ::tolower);
+        
+        // IMPROVED MATCHING: Check multiple patterns
+        bool name_matches = false;
+        
+        // 1. Exact match (texture base == material base)
+        if (tex_base_lower == mat_base_lower) {
+            name_matches = true;
+        }
+        // 2. Texture starts with material name (e.g., mat="helmet" matches "helmet_bcr")
+        else if (tex_base_lower.find(mat_base_lower) == 0) {
+            name_matches = true;
+        }
+        // 3. Material starts with texture base (e.g., mat="helmet_mat" matches "helmet_bcr")
+        else if (mat_base_lower.find(tex_base_lower) == 0 && tex_base_lower.length() >= 3) {
+            name_matches = true;
+        }
+        // 4. Common prefix matching (both share significant prefix)
+        else {
+            size_t common_len = 0;
+            size_t min_len = std::min(tex_base_lower.length(), mat_base_lower.length());
+            while (common_len < min_len && tex_base_lower[common_len] == mat_base_lower[common_len]) {
+                common_len++;
+            }
+            // Require at least 4 chars or 50% of material name to match
+            if (common_len >= 4 || (mat_base_lower.length() > 0 && common_len >= mat_base_lower.length() / 2)) {
+                name_matches = true;
+            }
+        }
+        
+        if (!name_matches) continue;
+        
+        // Skip non-diffuse textures
+        bool should_skip = false;
+        for (const auto& skip : skip_suffixes) {
+            if (tex_base_lower.length() >= skip.length()) {
+                std::string ending = tex_base_lower.substr(tex_base_lower.length() - skip.length());
+                if (ending == skip) { should_skip = true; break; }
+            }
+        }
+        if (should_skip) continue;
+        
+        // Check if texture is in same/similar directory
+        bool in_same_dir = false;
+        if (!mat_dir_lower.empty()) {
+            in_same_dir = tex_lower.find(mat_dir_lower) != std::string::npos;
+        }
+        
+        // Find priority based on suffix
+        int priority = 10;  // Default
+        for (size_t i = 0; i < diffuse_suffixes.size(); i++) {
+            const auto& suffix = diffuse_suffixes[i];
+            bool matches = suffix.empty() ? 
+                (tex_base_lower == mat_base_lower) :
+                (tex_base_lower.length() >= suffix.length() && 
+                 tex_base_lower.substr(tex_base_lower.length() - suffix.length()) == suffix);
+            
+            if (matches) {
+                priority = static_cast<int>(i);
+                break;
+            }
+        }
+        
+        // Prefer textures in same directory (add bonus)
+        bool is_better = false;
+        if (priority < best_priority) {
+            is_better = true;
+        } else if (priority == best_priority && in_same_dir && !best_in_same_dir) {
+            is_better = true;
+        }
+        
+        if (is_better) {
+            best_priority = priority;
+            best_match = tex;
+            best_in_same_dir = in_same_dir;
+        }
+    }
+    
+    return best_match;
+}
+
 void ModelViewer::clear() {
     // Clear mesh data
     current_mesh_.reset();
-    renderer_->set_mesh(nullptr);
+    renderer_->set_mesh(nullptr);  // shared_ptr<const XobMesh> accepts nullptr
     destroy_textures();
     
     // Reset state
@@ -91,67 +353,57 @@ void ModelViewer::load_model_data(const std::vector<uint8_t>& data, const std::s
     // ALWAYS clear previous model first
     clear();
     
+    // Reset lazy load counter for new model
+    auto& pak_mgr = PakManager::instance();
+    pak_mgr.reset_lazy_load_counter();
+    
     model_name_ = name;
     loading_ = true;
+    load_cancelled_ = false;
+    load_progress_ = 0.0f;
     error_message_.clear();
 
-    try {
-        if (data.empty()) {
-            error_message_ = "Empty data";
-            loading_ = false;
-            return;
-        }
-
-        XobParser parser(std::span<const uint8_t>(data.data(), data.size()));
-        auto mesh = parser.parse(0);
-
-        if (!mesh) {
-            error_message_ = "Failed to parse XOB file";
-            loading_ = false;
-            return;
-        }
-
-        // Validate mesh data
-        if (mesh->vertices.empty()) {
-            error_message_ = "XOB file has no vertices";
-            loading_ = false;
-            return;
-        }
-
-        if (mesh->lods.empty() || mesh->lods[0].indices.empty()) {
-            error_message_ = "XOB file has no indices";
-            loading_ = false;
-            return;
-        }
-
-        current_mesh_ = std::make_unique<XobMesh>(std::move(*mesh));
-        renderer_->set_mesh(current_mesh_.get());
-
-        vertex_count_ = current_mesh_->vertices.size();
-        face_count_ = current_mesh_->lods[0].indices.size() / 3;
-        lod_count_ = static_cast<int>(current_mesh_->lods.size());
-        if (lod_count_ == 0) lod_count_ = 1;
-
-        calculate_bounds();
-        
-        // Load material textures
-        load_material_textures();
-
-        // Center camera on model
-        glm::vec3 center = (bounds_min_ + bounds_max_) * 0.5f;
-        camera_->set_target(center);
-
-        float model_size = glm::length(bounds_max_ - bounds_min_);
-        if (model_size < 0.001f) model_size = 1.0f;
-        camera_->set_distance(model_size * 1.5f);
-
-        model_loaded_ = true;
+    if (data.empty()) {
+        error_message_ = "Empty data";
         loading_ = false;
-
-    } catch (const std::exception& e) {
-        error_message_ = std::string("Error: ") + e.what();
-        loading_ = false;
+        return;
     }
+
+    // Copy data for async processing (data may go out of scope)
+    auto data_copy = std::make_shared<std::vector<uint8_t>>(data);
+    
+    // Parse mesh asynchronously to keep UI responsive
+    load_future_ = std::async(std::launch::async, [this, data_copy]() -> std::shared_ptr<XobMesh> {
+        try {
+            load_progress_ = 0.1f;
+            
+            XobParser parser(std::span<const uint8_t>(data_copy->data(), data_copy->size()));
+            
+            if (load_cancelled_) return nullptr;
+            load_progress_ = 0.3f;
+            
+            auto mesh = parser.parse(0);
+            
+            if (load_cancelled_) return nullptr;
+            load_progress_ = 0.7f;
+            
+            if (!mesh) {
+                return nullptr;
+            }
+            
+            // Validate mesh data
+            if (mesh->vertices.empty() || mesh->lods.empty() || mesh->lods[0].indices.empty()) {
+                return nullptr;
+            }
+            
+            load_progress_ = 0.9f;
+            
+            return std::make_shared<XobMesh>(std::move(*mesh));
+            
+        } catch (const std::exception&) {
+            return nullptr;
+        }
+    });
 }
 
 void ModelViewer::load_model(const std::filesystem::path& path) {
@@ -227,6 +479,40 @@ void ModelViewer::ensure_framebuffer(int width, int height) {
 }
 
 void ModelViewer::render() {
+    // Check if async loading has completed
+    if (loading_ && load_future_.valid()) {
+        if (load_future_.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            try {
+                auto mesh = load_future_.get();
+                if (mesh) {
+                    current_mesh_ = mesh;
+                    renderer_->set_mesh(current_mesh_);
+                    
+                    vertex_count_ = current_mesh_->vertices.size();
+                    face_count_ = current_mesh_->lods[0].indices.size() / 3;
+                    lod_count_ = static_cast<int>(current_mesh_->lods.size());
+                    if (lod_count_ == 0) lod_count_ = 1;
+                    
+                    calculate_bounds();
+                    load_material_textures();
+                    
+                    glm::vec3 center = (bounds_min_ + bounds_max_) * 0.5f;
+                    camera_->set_target(center);
+                    float model_size = glm::length(bounds_max_ - bounds_min_);
+                    camera_->set_distance(model_size * 1.5f);
+                    
+                    model_loaded_ = true;
+                } else {
+                    error_message_ = "Failed to parse XOB file";
+                }
+            } catch (const std::exception& e) {
+                error_message_ = std::string("Load error: ") + e.what();
+            }
+            loading_ = false;
+            load_progress_ = 0.0f;
+        }
+    }
+    
     // Render toolbar
     render_toolbar();
     ImGui::Separator();
@@ -246,7 +532,13 @@ void ModelViewer::render() {
     int view_height = static_cast<int>(content_region.y - 30);
 
     if (loading_) {
+        float progress = load_progress_.load();
         ImGui::Text("Loading model...");
+        ImGui::ProgressBar(progress, ImVec2(-1, 0), 
+            progress > 0 ? nullptr : "Parsing...");
+        if (ImGui::Button("Cancel")) {
+            load_cancelled_ = true;
+        }
         return;
     }
 
@@ -349,220 +641,217 @@ void ModelViewer::render_info_bar() {
 
 void ModelViewer::load_material_textures() {
     if (!current_mesh_ || current_mesh_->materials.empty()) {
-        std::cerr << "[ModelViewer] No materials to load\n";
         return;
     }
     
     if (!texture_loader_) {
-        std::cerr << "[ModelViewer] No texture loader set\n";
         return;
     }
     
+    auto& pak_mgr = PakManager::instance();
+    
     std::cerr << "[ModelViewer] Auto-loading textures for " << current_mesh_->materials.size() << " materials\n";
-    std::cerr << "[ModelViewer] Available textures count: " << available_textures_.size() << "\n";
-    std::cerr << "[ModelViewer] Model path: " << model_name_ << "\n";
+    std::cerr << "[ModelViewer] Available textures in PAK: " << available_textures_.size() << "\n";
+    std::cerr << "[ModelViewer] Texture cache size: " << texture_cache_.size() << "\n";
     
-    // Extract model directory for relative texture lookups
-    std::string model_dir;
-    size_t last_slash = model_name_.rfind('/');
-    if (last_slash == std::string::npos) last_slash = model_name_.rfind('\\');
-    if (last_slash != std::string::npos) {
-        model_dir = model_name_.substr(0, last_slash);
-    }
-    std::cerr << "[ModelViewer] Model directory: " << model_dir << "\n";
+    int textures_loaded = 0;
+    int textures_from_cache = 0;
     
-    // Debug: print first 10 available textures
-    int debug_count = 0;
-    for (const auto& tex : available_textures_) {
-        if (debug_count++ < 10) {
-            std::cerr << "[ModelViewer]   Available: " << tex << "\n";
+    // Helper lambda to search index for a texture
+    auto search_index_for_texture = [&](const std::string& texture_path) -> std::vector<uint8_t> {
+        if (!pak_mgr.is_index_ready()) return {};
+        
+        // Try to load the PAK containing this texture
+        if (pak_mgr.try_load_pak_for_file(texture_path)) {
+            auto data = pak_mgr.read_file(texture_path);
+            if (!data.empty()) return data;
         }
-    }
+        return {};
+    };
     
-    // Build a map of texture base names to full paths for quick lookup
-    // Key: lowercase base name (without path and extension), Value: full path
-    std::map<std::string, std::vector<std::string>> texture_map;
-    
-    for (const auto& tex : available_textures_) {
-        std::string tex_lower = tex;
-        std::transform(tex_lower.begin(), tex_lower.end(), tex_lower.begin(), ::tolower);
-        
-        // Only consider .edds files
-        if (tex_lower.find(".edds") == std::string::npos) continue;
-        
-        // Extract filename without path
-        std::string filename = tex;
-        size_t last_slash = tex.rfind('/');
-        if (last_slash != std::string::npos) {
-            filename = tex.substr(last_slash + 1);
-        }
-        
-        // Store with lowercase filename as key
-        std::string key = filename;
-        std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-        texture_map[key].push_back(tex);
-    }
-    
-    // For each material, find the best matching diffuse texture
+    // For each material, find the best texture
     for (size_t mat_idx = 0; mat_idx < current_mesh_->materials.size(); mat_idx++) {
-        const auto& mat = current_mesh_->materials[mat_idx];
+        auto& mat = current_mesh_->materials[mat_idx];
+        bool texture_found = false;
+        
         std::cerr << "[ModelViewer] Processing material " << mat_idx << ": " << mat.name << "\n";
         
-        // Extract base name from material (remove extension)
-        std::string mat_base = mat.name;
-        size_t ext_pos = mat_base.rfind('.');
-        if (ext_pos != std::string::npos) {
-            mat_base = mat_base.substr(0, ext_pos);
+        // Get material directory for locality matching
+        std::string mat_dir;
+        if (!mat.path.empty()) {
+            size_t dir_slash = mat.path.rfind('/');
+            if (dir_slash != std::string::npos) {
+                mat_dir = mat.path.substr(0, dir_slash);
+            }
         }
-        std::string mat_base_lower = mat_base;
-        std::transform(mat_base_lower.begin(), mat_base_lower.end(), mat_base_lower.begin(), ::tolower);
         
-        // Diffuse texture suffixes in priority order
-        // Enfusion: _BCR (Base Color Roughness), _MCR (Metal Color Roughness - also contains color!)
-        std::vector<std::string> diffuse_suffixes = {
-            "_bcr", "_mcr", "_co", "_diffuse", "_diff", "_d", "_albedo", "_color", "_basecolor", ""
-        };
-        
-        // Suffixes that indicate NON-diffuse textures (skip these)
-        std::vector<std::string> skip_suffixes = {
-            "_global_mask", "_mask", "_nmo", "_normal", "_nm", "_n",
-            "_smdi", "_specular", "_spec", "_ao", "_occlusion",
-            "_roughness", "_metallic", "_height",
-            "_emissive", "_opacity", "_alpha", "_vfx"
-        };
-        
-        std::string best_match;
-        int best_priority = 999;
-        
-        // Search all available textures
-        for (const auto& [tex_key, tex_paths] : texture_map) {
-            // Remove .edds for comparison
-            std::string tex_base = tex_key;
-            size_t edds_pos = tex_base.rfind(".edds");
-            if (edds_pos != std::string::npos) {
-                tex_base = tex_base.substr(0, edds_pos);
+        // PRIORITY 1: Use improved texture matching with fuzzy name matching
+        std::string local_match = find_best_texture_match(mat.name, mat_dir);
+        if (!local_match.empty()) {
+            std::cerr << "[ModelViewer] Found local texture match: " << local_match << "\n";
+            
+            // Check texture cache first
+            uint32_t cached_tex = get_cached_texture(local_match);
+            if (cached_tex != 0) {
+                material_diffuse_textures_[mat_idx] = cached_tex;
+                renderer_->set_material_texture(mat_idx, cached_tex);
+                textures_loaded++;
+                textures_from_cache++;
+                std::cerr << "[ModelViewer] Using cached texture: " << local_match << "\n";
+                continue;
             }
             
-            // Check if this texture's base name starts with or contains the material name
-            bool name_matches = false;
-            
-            // Exact match: texture is materialname_suffix or just materialname
-            if (tex_base.find(mat_base_lower) == 0) {
-                name_matches = true;
+            // Load texture data
+            if (texture_loader_) {
+                auto tex_data = texture_loader_(local_match);
+                if (!tex_data.empty()) {
+                    texture_found = try_load_texture_data(mat_idx, tex_data, local_match);
+                    if (texture_found) {
+                        textures_loaded++;
+                        std::cerr << "[ModelViewer] Loaded from local PAK: " << local_match << "\n";
+                        continue;
+                    }
+                }
             }
-            // Also try if material name is contained in texture name
-            else if (tex_base.find(mat_base_lower) != std::string::npos) {
-                name_matches = true;
+        }
+        
+        // PRIORITY 2: Try to load emat and get texture path from it
+        std::string emat_texture_path;
+        if (!mat.path.empty()) {
+            std::cerr << "[ModelViewer] Loading emat: " << mat.path << "\n";
+            
+            // Try local PAK first
+            auto emat_data = texture_loader_ ? texture_loader_(mat.path) : std::vector<uint8_t>{};
+            if (emat_data.empty()) emat_data = pak_mgr.read_file(mat.path);
+            
+            // Try index for emat
+            if (emat_data.empty() && pak_mgr.is_index_ready()) {
+                pak_mgr.try_load_pak_for_file(mat.path);
+                emat_data = pak_mgr.read_file(mat.path);
             }
             
-            if (!name_matches) continue;
+            if (!emat_data.empty()) {
+                auto tex_paths = parse_emat_textures(emat_data);
+                if (tex_paths.count("Diffuse")) {
+                    emat_texture_path = tex_paths["Diffuse"];
+                    std::cerr << "[ModelViewer] Emat specifies diffuse: " << emat_texture_path << "\n";
+                    
+                    // Check if emat texture is "shared" (contains _SharedData or similar)
+                    bool is_shared_texture = emat_texture_path.find("_SharedData") != std::string::npos ||
+                                             emat_texture_path.find("_shared") != std::string::npos;
+                    
+                    // If shared texture, prefer local match if we have one
+                    if (is_shared_texture && !local_match.empty()) {
+                        std::cerr << "[ModelViewer] Emat uses shared texture, preferring local: " << local_match << "\n";
+                        // Already tried local above, so skip emat texture
+                    } else {
+                        // Try to load emat texture from current PAK
+                        auto tex_data = texture_loader_ ? texture_loader_(emat_texture_path) : std::vector<uint8_t>{};
+                        if (tex_data.empty()) tex_data = pak_mgr.read_file(emat_texture_path);
+                        
+                        // Try index for texture (searches all PAKs including game PAKs)
+                        if (tex_data.empty()) {
+                            std::cerr << "[ModelViewer] Searching index for: " << emat_texture_path << "\n";
+                            tex_data = search_index_for_texture(emat_texture_path);
+                        }
+                        
+                        if (!tex_data.empty()) {
+                            texture_found = try_load_texture_data(mat_idx, tex_data, emat_texture_path);
+                            if (texture_found) {
+                                textures_loaded++;
+                                std::cerr << "[ModelViewer] Loaded from emat: " << emat_texture_path << "\n";
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // PRIORITY 3: Search index for texture by material name patterns
+        if (!texture_found) {
+            // Diffuse texture suffixes in priority order
+            static const std::vector<std::string> diffuse_suffixes = {
+                "_bcr", "_mcr", "_co", "_diffuse", "_diff", "_d", "_albedo", "_color", "_basecolor", ""
+            };
             
-            // Check if this is a skip texture (normal map, mask, etc.)
-            bool should_skip = false;
-            for (const auto& skip : skip_suffixes) {
-                if (tex_base.length() >= skip.length()) {
-                    std::string ending = tex_base.substr(tex_base.length() - skip.length());
-                    if (ending == skip) {
-                        should_skip = true;
+            std::string mat_base = mat.name;
+            size_t ext_pos = mat_base.rfind('.');
+            if (ext_pos != std::string::npos) mat_base = mat_base.substr(0, ext_pos);
+            
+            // Get directory from material path
+            std::string mat_dir;
+            if (!mat.path.empty()) {
+                size_t dir_slash = mat.path.rfind('/');
+                if (dir_slash != std::string::npos) {
+                    mat_dir = mat.path.substr(0, dir_slash);
+                }
+            }
+            
+            // Build search paths
+            std::vector<std::string> search_paths;
+            for (const auto& suffix : diffuse_suffixes) {
+                if (!mat_dir.empty()) {
+                    search_paths.push_back(mat_dir + "/Textures/" + mat_base + suffix + ".edds");
+                    search_paths.push_back(mat_dir + "/" + mat_base + suffix + ".edds");
+                }
+                // Generic asset paths
+                search_paths.push_back("Assets/Textures/" + mat_base + suffix + ".edds");
+            }
+            
+            for (const auto& search_path : search_paths) {
+                // Try current PAK
+                auto tex_data = texture_loader_ ? texture_loader_(search_path) : std::vector<uint8_t>{};
+                if (tex_data.empty()) tex_data = pak_mgr.read_file(search_path);
+                
+                // Try index (all PAKs)
+                if (tex_data.empty()) {
+                    tex_data = search_index_for_texture(search_path);
+                }
+                
+                if (!tex_data.empty()) {
+                    texture_found = try_load_texture_data(mat_idx, tex_data, search_path);
+                    if (texture_found) {
+                        textures_loaded++;
+                        std::cerr << "[ModelViewer] Loaded from search: " << search_path << "\n";
                         break;
                     }
                 }
             }
-            if (should_skip) continue;
+        }
+        
+        // PRIORITY 4: Search by material base name in index
+        if (!texture_found && pak_mgr.is_index_ready()) {
+            std::string mat_base = mat.name;
+            size_t ext_pos = mat_base.rfind('.');
+            if (ext_pos != std::string::npos) mat_base = mat_base.substr(0, ext_pos);
             
-            // Find the priority of this texture based on its suffix
-            for (size_t i = 0; i < diffuse_suffixes.size(); i++) {
-                const auto& suffix = diffuse_suffixes[i];
-                bool matches = false;
+            auto matches = pak_mgr.search_textures_by_material(mat_base);
+            if (!matches.empty()) {
+                std::cerr << "[ModelViewer] Index search found " << matches.size() << " matches for " << mat_base << "\n";
+                const auto& best = matches[0];
                 
-                if (suffix.empty()) {
-                    // Empty suffix means exact match (materialname.edds)
-                    matches = (tex_base == mat_base_lower);
-                } else {
-                    // Check if texture ends with this suffix
-                    if (tex_base.length() >= suffix.length()) {
-                        std::string ending = tex_base.substr(tex_base.length() - suffix.length());
-                        matches = (ending == suffix);
+                auto tex_data = pak_mgr.read_file(best.path);
+                if (tex_data.empty()) tex_data = search_index_for_texture(best.path);
+                
+                if (!tex_data.empty()) {
+                    texture_found = try_load_texture_data(mat_idx, tex_data, best.path);
+                    if (texture_found) {
+                        textures_loaded++;
+                        std::cerr << "[ModelViewer] Loaded from index search: " << best.path << "\n";
                     }
-                }
-                
-                if (matches && static_cast<int>(i) < best_priority) {
-                    best_priority = static_cast<int>(i);
-                    best_match = tex_paths[0];  // Use first path if multiple
-                    break;
                 }
             }
         }
         
-        // Apply the best match if found
-        if (!best_match.empty()) {
-            std::cerr << "[ModelViewer] Matched texture for material " << mat_idx 
-                      << ": " << best_match << " (priority: " << best_priority << ")\n";
-            apply_texture_to_material(mat_idx, best_match);
-        } else {
-            std::cerr << "[ModelViewer] No texture match in available_textures for: " << mat.name << "\n";
-            
-            // Fallback: try to load from PAK (current or via PakManager for cross-PAK)
-            bool found = false;
-            
-            std::string path_base = mat.path.empty() ? mat.name : mat.path;
-            size_t ext_pos2 = path_base.rfind('.');
-            if (ext_pos2 != std::string::npos) {
-                path_base = path_base.substr(0, ext_pos2);
-            }
-            
-            // Get directory from path
-            std::string dir_path;
-            size_t last_slash = path_base.rfind('/');
-            if (last_slash != std::string::npos) {
-                dir_path = path_base.substr(0, last_slash);
-                path_base = path_base.substr(last_slash + 1);
-            }
-            
-            // Try various texture path patterns
-            std::vector<std::string> paths_to_try = {
-                dir_path + "/Textures/" + path_base + "_BCR.edds",
-                dir_path + "/Textures/" + path_base + "_MCR.edds",
-                dir_path + "/Textures/" + path_base + "_co.edds",
-                dir_path + "/Textures/" + path_base + ".edds",
-                dir_path + "/" + path_base + "_BCR.edds",
-                dir_path + "/" + path_base + "_MCR.edds",
-                dir_path + "/" + path_base + "_co.edds",
-                dir_path + "/" + path_base + ".edds"
-            };
-            
-            // First try with current PAK's texture_loader_
-            if (texture_loader_) {
-                for (const auto& path : paths_to_try) {
-                    auto data = texture_loader_(path);
-                    if (!data.empty()) {
-                        found = try_load_texture_data(mat_idx, data, path);
-                        if (found) break;
-                    }
-                }
-            }
-            
-            // If not found, try PakManager for cross-PAK lookup
-            if (!found) {
-                auto& pak_mgr = PakManager::instance();
-                for (const auto& path : paths_to_try) {
-                    auto data = pak_mgr.read_file(path);
-                    if (!data.empty()) {
-                        std::cerr << "[ModelViewer] Found texture via PakManager: " << path << "\n";
-                        found = try_load_texture_data(mat_idx, data, path);
-                        if (found) break;
-                    }
-                }
-            }
-            
-            if (!found) {
-                std::cerr << "Failed to find texture for material: " << mat.name << "\n";
-            }
+        if (!texture_found) {
+            std::cerr << "[ModelViewer] No texture found for material " << mat_idx << ": " << mat.name << "\n";
         }
     }
     
-    std::cerr << "[ModelViewer] Auto-texture loading complete. " 
-              << material_diffuse_textures_.size() << " textures applied.\n";
+    std::cerr << "[ModelViewer] Loaded " << textures_loaded << "/" 
+              << current_mesh_->materials.size() << " material textures"
+              << " (" << textures_from_cache << " from cache)\n";
 }
 
 void ModelViewer::filter_textures() {
@@ -594,14 +883,11 @@ void ModelViewer::apply_texture(const std::string& path) {
         return;
     }
     
-    std::cerr << "[ModelViewer] Applying texture: " << path << "\n";
-    
     // Destroy old texture
     destroy_textures();
     
     auto data = texture_loader_(path);
     if (data.empty()) {
-        std::cerr << "[ModelViewer] Failed to load texture data\n";
         return;
     }
     
@@ -609,14 +895,12 @@ void ModelViewer::apply_texture(const std::string& path) {
     EddsConverter converter(std::span<const uint8_t>(data.data(), data.size()));
     auto dds_data = converter.convert();
     if (dds_data.empty()) {
-        std::cerr << "[ModelViewer] EDDS conversion failed\n";
         return;
     }
     
     // Load DDS
     auto texture = DdsLoader::load(std::span<const uint8_t>(dds_data.data(), dds_data.size()));
     if (!texture || texture->pixels.empty()) {
-        std::cerr << "[ModelViewer] DDS loading failed\n";
         return;
     }
     
@@ -634,7 +918,6 @@ void ModelViewer::apply_texture(const std::string& path) {
     
     renderer_->set_texture(diffuse_texture_);
     current_texture_path_ = path;
-    std::cerr << "[ModelViewer] Texture applied: " << texture->width << "x" << texture->height << "\n";
 }
 
 void ModelViewer::render_texture_browser() {
@@ -777,6 +1060,15 @@ void ModelViewer::apply_texture_to_material(size_t material_index, const std::st
 bool ModelViewer::try_load_texture_data(size_t material_index, const std::vector<uint8_t>& data, const std::string& path) {
     if (data.empty()) return false;
     
+    // Check if this texture is already in cache
+    uint32_t cached_tex = get_cached_texture(path);
+    if (cached_tex != 0) {
+        material_diffuse_textures_[material_index] = cached_tex;
+        renderer_->set_material_texture(material_index, cached_tex);
+        std::cerr << "[ModelViewer] Material " << material_index << " using cached texture: " << path << "\n";
+        return true;
+    }
+    
     // Convert EDDS to DDS
     EddsConverter converter(std::span<const uint8_t>(data.data(), data.size()));
     auto dds_data = converter.convert();
@@ -785,12 +1077,6 @@ bool ModelViewer::try_load_texture_data(size_t material_index, const std::vector
     // Load DDS
     auto texture = DdsLoader::load(std::span<const uint8_t>(dds_data.data(), dds_data.size()));
     if (!texture || texture->pixels.empty()) return false;
-    
-    // Delete old texture if exists
-    auto it = material_diffuse_textures_.find(material_index);
-    if (it != material_diffuse_textures_.end() && it->second != 0) {
-        glDeleteTextures(1, &it->second);
-    }
     
     // Create GL texture
     uint32_t tex_id;
@@ -805,11 +1091,14 @@ bool ModelViewer::try_load_texture_data(size_t material_index, const std::vector
     glGenerateMipmap(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, 0);
     
+    // Add to cache
+    add_texture_to_cache(path, tex_id, texture->width, texture->height);
+    
     material_diffuse_textures_[material_index] = tex_id;
     renderer_->set_material_texture(material_index, tex_id);
     
-    std::cerr << "[ModelViewer] Material " << material_index << " texture applied from " << path 
-              << ": " << texture->width << "x" << texture->height << "\n";
+    std::cerr << "[ModelViewer] Material " << material_index << " texture loaded from " << path 
+              << ": " << texture->width << "x" << texture->height << " (added to cache)\n";
     return true;
 }
 

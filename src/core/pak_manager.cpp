@@ -299,6 +299,96 @@ std::vector<std::string> PakManager::get_all_texture_paths(const std::string& fi
     return result;
 }
 
+std::vector<PakManager::TextureMatch> PakManager::search_textures_by_material(
+    const std::string& material_name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<TextureMatch> results;
+    
+    // Lowercase material name for comparison
+    std::string mat_lower = material_name;
+    std::transform(mat_lower.begin(), mat_lower.end(), mat_lower.begin(), ::tolower);
+    
+    // Suffixes to skip (non-diffuse textures)
+    std::vector<std::string> skip_suffixes = {
+        "_global_mask", "_mask", "_nmo", "_normal", "_nm", "_n",
+        "_smdi", "_specular", "_spec", "_ao", "_occlusion",
+        "_roughness", "_metallic", "_height",
+        "_emissive", "_opacity", "_alpha", "_vfx"
+    };
+    
+    // Diffuse suffixes in priority order
+    std::vector<std::pair<std::string, int>> diffuse_priorities = {
+        {"_bcr", 0}, {"_mcr", 1}, {"_co", 2}, {"_diffuse", 3},
+        {"_diff", 4}, {"_d", 5}, {"_albedo", 6}, {"_color", 7}, {"_basecolor", 8}
+    };
+    
+    for (const auto& pak : paks_) {
+        for (const auto& file : pak->file_list) {
+            std::filesystem::path p(file);
+            std::string ext = p.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            
+            // Only consider texture files
+            if (ext != ".edds" && ext != ".dds") continue;
+            
+            // Get filename without extension
+            std::string filename = p.stem().string();
+            std::string filename_lower = filename;
+            std::transform(filename_lower.begin(), filename_lower.end(), 
+                          filename_lower.begin(), ::tolower);
+            
+            // Check if filename starts with material name
+            if (filename_lower.find(mat_lower) != 0) continue;
+            
+            // Check if it's a skip texture (normal, mask, etc.)
+            bool should_skip = false;
+            for (const auto& skip : skip_suffixes) {
+                if (filename_lower.length() >= skip.length()) {
+                    std::string ending = filename_lower.substr(
+                        filename_lower.length() - skip.length());
+                    if (ending == skip) {
+                        should_skip = true;
+                        break;
+                    }
+                }
+            }
+            if (should_skip) continue;
+            
+            // Determine priority based on suffix
+            int priority = 100;  // Default low priority
+            
+            // Check for exact match (no suffix beyond material name)
+            if (filename_lower == mat_lower) {
+                priority = 9;  // Exact match with no suffix
+            } else {
+                for (const auto& [suffix, prio] : diffuse_priorities) {
+                    if (filename_lower.length() >= suffix.length()) {
+                        std::string ending = filename_lower.substr(
+                            filename_lower.length() - suffix.length());
+                        if (ending == suffix) {
+                            priority = prio;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // Only add if it's a diffuse-type texture
+            if (priority <= 9) {
+                results.push_back({file, priority});
+            }
+        }
+    }
+    
+    // Sort by priority (lower = better)
+    std::sort(results.begin(), results.end(), 
+              [](const TextureMatch& a, const TextureMatch& b) {
+                  return a.priority < b.priority;
+              });
+    
+    return results;
+}
+
 void PakManager::scan_game_folder(const std::filesystem::path& game_path) {
     game_folder_ = game_path;
     
@@ -350,6 +440,127 @@ void PakManager::load_common_paks() {
             load_pak(pak_path);
         }
     }
+}
+
+void PakManager::set_game_path(const std::filesystem::path& game_path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    game_folder_ = game_path;
+    std::cerr << "[PakManager] Game path set: " << game_path.string() << "\n";
+}
+
+void PakManager::set_mods_path(const std::filesystem::path& mods_path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    mods_folder_ = mods_path;
+    std::cerr << "[PakManager] Mods path set: " << mods_path.string() << "\n";
+}
+
+void PakManager::scan_directory_for_paks(const std::filesystem::path& dir) {
+    if (!std::filesystem::exists(dir)) return;
+    
+    try {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(dir)) {
+            if (!entry.is_regular_file()) continue;
+            
+            std::string ext = entry.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            
+            if (ext == ".pak") {
+                // Add to available list if not already there
+                auto it = std::find(available_paks_.begin(), available_paks_.end(), 
+                                   entry.path());
+                if (it == available_paks_.end()) {
+                    available_paks_.push_back(entry.path());
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[PakManager] Error scanning " << dir.string() 
+                  << ": " << e.what() << "\n";
+    }
+}
+
+void PakManager::scan_available_paks() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    available_paks_.clear();
+    
+    // Scan game Addons folder
+    if (!game_folder_.empty()) {
+        std::filesystem::path addons_path = game_folder_ / "Addons";
+        if (std::filesystem::exists(addons_path)) {
+            scan_directory_for_paks(addons_path);
+        } else if (std::filesystem::exists(game_folder_)) {
+            scan_directory_for_paks(game_folder_);
+        }
+    }
+    
+    // Scan mods folder
+    if (!mods_folder_.empty() && std::filesystem::exists(mods_folder_)) {
+        scan_directory_for_paks(mods_folder_);
+    }
+    
+    std::cerr << "[PakManager] Found " << available_paks_.size() 
+              << " available PAKs\n";
+}
+
+void PakManager::initialize_index(IndexProgressCallback callback) {
+    auto& index = PakIndex::instance();
+    
+    // Set paths
+    index.set_game_path(game_folder_);
+    index.set_mods_path(mods_folder_);
+    
+    // Open database and build/update index
+    if (index.open_database()) {
+        index.build_index(callback);
+        std::cerr << "[PakManager] Index ready: " << index.total_files() << " files in " 
+                  << index.total_paks() << " PAKs\n";
+    }
+}
+
+bool PakManager::is_index_ready() const {
+    return PakIndex::instance().is_ready();
+}
+
+bool PakManager::try_load_pak_for_file(const std::string& virtual_path) {
+    // Don't do lazy loading if disabled
+    if (!lazy_loading_) return false;
+    
+    // First check if any loaded PAK already has the file
+    if (file_exists(virtual_path)) return true;
+    
+    // Use the PakIndex to find the exact PAK
+    auto& index = PakIndex::instance();
+    if (index.is_ready()) {
+        std::filesystem::path pak_path = index.find_pak_for_file(virtual_path);
+        
+        if (!pak_path.empty()) {
+            std::cerr << "[PakManager] Index found PAK for " << virtual_path 
+                      << ": " << pak_path.filename().string() << "\n";
+            
+            // We know exactly which PAK has this file
+            if (!is_loaded(pak_path)) {
+                std::cerr << "[PakManager] Loading PAK: " << pak_path.string() << "\n";
+                if (load_pak(pak_path)) {
+                    lazy_load_count_++;
+                    return file_exists(virtual_path);
+                }
+            }
+            return file_exists(virtual_path);
+        }
+        // File not in index
+        std::cerr << "[PakManager] File not in index: " << virtual_path << "\n";
+        return false;
+    } else {
+        std::cerr << "[PakManager] Index not ready, cannot find: " << virtual_path << "\n";
+    }
+    
+    // No index ready - limit lazy loading
+    if (lazy_load_count_ >= max_lazy_loads_) {
+        return false;
+    }
+    
+    // No index and at limit - can't find file
+    return false;
 }
 
 std::vector<FileDependency> PakManager::find_material_dependencies(

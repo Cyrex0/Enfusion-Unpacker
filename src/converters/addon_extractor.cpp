@@ -21,15 +21,37 @@ AddonExtractor::~AddonExtractor() = default;
 
 bool AddonExtractor::load(const std::filesystem::path& addon_dir) {
     addon_dir_ = addon_dir;
-    pak_path_ = addon_dir / "data.pak";
-    rdb_path_ = addon_dir / "resourceDatabase.rdb";
+    last_error_.clear();
     
-    if (!std::filesystem::exists(pak_path_)) return false;
+    std::cerr << "[AddonExtractor] Loading: " << addon_dir.string() << "\n";
+    
+    // Support both: directory containing data.pak, or direct PAK file path
+    if (std::filesystem::is_regular_file(addon_dir)) {
+        // Direct PAK file path
+        pak_path_ = addon_dir;
+        addon_dir_ = addon_dir.parent_path();
+        rdb_path_ = addon_dir_ / "resourceDatabase.rdb";
+        std::cerr << "[AddonExtractor] Direct PAK file mode\n";
+    } else {
+        // Directory containing data.pak
+        pak_path_ = addon_dir / "data.pak";
+        rdb_path_ = addon_dir / "resourceDatabase.rdb";
+        std::cerr << "[AddonExtractor] Directory mode, PAK: " << pak_path_.string() << "\n";
+    }
+    
+    if (!std::filesystem::exists(pak_path_)) {
+        set_error("PAK file not found: " + pak_path_.string());
+        std::cerr << "[AddonExtractor] " << last_error_ << "\n";
+        return false;
+    }
+    
+    std::cerr << "[AddonExtractor] PAK exists, size: " << std::filesystem::file_size(pak_path_) << " bytes\n";
     
     // Initialize and open PAK reader
     pak_reader_ = std::make_unique<PakReader>();
     if (!pak_reader_->open(pak_path_)) {
-        std::cerr << "Failed to open PAK file with PakReader" << std::endl;
+        set_error("Failed to parse PAK file (invalid format?): " + pak_path_.string());
+        std::cerr << "[AddonExtractor] " << last_error_ << "\n";
         return false;
     }
     
@@ -64,13 +86,15 @@ std::vector<RdbFile> AddonExtractor::list_files() const {
 std::vector<uint8_t> AddonExtractor::read_file(const RdbFile& file) {
     // Use PakReader to read the file data correctly
     if (!pak_reader_ || !pak_reader_->is_open()) {
-        std::cerr << "PAK reader not available" << std::endl;
+        set_error("Cannot read file: PAK reader not initialized");
+        std::cerr << "[AddonExtractor] " << last_error_ << std::endl;
         return {};
     }
     
     auto data = pak_reader_->read_file(file.path);
     if (data.empty()) {
-        std::cerr << "Failed to read file from PAK: " << file.path << std::endl;
+        set_error("Failed to read file from PAK: " + file.path);
+        std::cerr << "[AddonExtractor] " << last_error_ << std::endl;
     }
     return data;
 }
@@ -78,13 +102,15 @@ std::vector<uint8_t> AddonExtractor::read_file(const RdbFile& file) {
 std::vector<uint8_t> AddonExtractor::read_file(const std::string& path) {
     // Use PakReader directly - it has the correct path->offset mapping
     if (!pak_reader_ || !pak_reader_->is_open()) {
-        std::cerr << "PAK reader not available" << std::endl;
+        set_error("Cannot read file: PAK reader not initialized");
+        std::cerr << "[AddonExtractor] " << last_error_ << std::endl;
         return {};
     }
     
     auto data = pak_reader_->read_file(path);
     if (data.empty()) {
-        std::cerr << "Failed to read file from PAK: " << path << std::endl;
+        set_error("Failed to read file from PAK: " + path);
+        std::cerr << "[AddonExtractor] " << last_error_ << std::endl;
     }
     return data;
 }

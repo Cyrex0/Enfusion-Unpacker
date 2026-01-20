@@ -86,9 +86,15 @@ public:
      * Get addon directory path
      */
     const std::filesystem::path& addon_dir() const { return addon_dir_; }
+    
+    /**
+     * Get last error message for debugging
+     */
+    const std::string& last_error() const { return last_error_; }
 
 private:
     bool parse_rdb();
+    void set_error(const std::string& msg) { last_error_ = msg; }
 
     std::filesystem::path addon_dir_;
     std::filesystem::path pak_path_;
@@ -100,6 +106,7 @@ private:
     std::vector<RdbFile> files_;
 
     bool loaded_ = false;
+    std::string last_error_;
 };
 
 } // namespace enfusion

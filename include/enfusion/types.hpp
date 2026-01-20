@@ -164,6 +164,8 @@ struct AppSettings {
     fs::path last_addon_path;
     fs::path last_export_path;
     fs::path arma_addons_path;
+    fs::path game_install_path;    // Game installation path (contains Addons folder)
+    fs::path mods_install_path;    // Mods folder path (Workshop or custom mods)
 
     // Export settings
     bool convert_textures_to_png = true;

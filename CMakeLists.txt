@@ -29,6 +29,7 @@ endif()
 find_package(ZLIB REQUIRED)
 find_package(lz4 CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
 find_package(glad CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
@@ -48,6 +49,7 @@ set(CORE_SOURCES
     src/core/rdb_parser.cpp
     src/core/manifest.cpp
     src/core/pak_manager.cpp
+    src/core/pak_index.cpp
 )
 
 # Source files - Formats
@@ -117,6 +119,7 @@ target_link_libraries(EnfusionUnpacker PRIVATE
     ZLIB::ZLIB
     lz4::lz4
     nlohmann_json::nlohmann_json
+    unofficial::sqlite3::sqlite3
     glfw
     glad::glad
     imgui::imgui

@@ -16,6 +16,7 @@
 #include <cstring>
 #include <algorithm>
 #include <array>
+#include <iostream>
 
 namespace enfusion {
 
@@ -49,8 +50,11 @@ uint32_t PakReader::read_uint32_le(std::istream& stream) {
 }
 
 bool PakReader::open(const std::filesystem::path& path) {
+    std::cerr << "[PakReader] Opening: " << path.string() << "\n";
+    
     file_.open(path, std::ios::binary);
     if (!file_) {
+        std::cerr << "[PakReader] Failed to open file: " << path.string() << "\n";
         return false;
     }
     
@@ -58,15 +62,20 @@ bool PakReader::open(const std::filesystem::path& path) {
     
     // Parse FORM header
     if (!parse_form_header()) {
+        std::cerr << "[PakReader] Failed to parse FORM header\n";
         file_.close();
         return false;
     }
     
     // Parse all chunks
     if (!parse_chunks()) {
+        std::cerr << "[PakReader] Failed to parse chunks\n";
         file_.close();
         return false;
     }
+    
+    std::cerr << "[PakReader] Successfully opened: " << path.filename().string() 
+              << " (" << file_count() << " files)\n";
     
     return true;
 }
@@ -76,6 +85,8 @@ bool PakReader::parse_form_header() {
     char sig[4];
     file_.read(sig, 4);
     if (std::memcmp(sig, FORM_SIGNATURE.data(), 4) != 0) {
+        std::cerr << "[PakReader] Invalid FORM signature: " 
+                  << std::string(sig, 4) << " (expected FORM)\n";
         return false;
     }
     
@@ -87,6 +98,8 @@ bool PakReader::parse_form_header() {
     char form_type[4];
     file_.read(form_type, 4);
     if (std::memcmp(form_type, PAC1_TYPE.data(), 4) != 0) {
+        std::cerr << "[PakReader] Invalid form type: " 
+                  << std::string(form_type, 4) << " (expected PAC1)\n";
         return false;
     }
     
@@ -140,96 +153,67 @@ void PakReader::parse_file_entries(std::istream& stream, uint32_t chunk_size) {
     // Skip 6-byte header (appears to be version/count info)
     stream.seekg(6, std::ios::cur);
     
-    // Parse entries recursively
-    parse_entry_recursive(stream, "", end_pos);
+    // Parse entries recursively - pass entry count for root level
+    // Root entries don't have a count prefix, so we parse until end_pos
+    parse_directory_contents(stream, "", end_pos, -1);
 }
 
-void PakReader::parse_entry_recursive(std::istream& stream, const std::string& parent_path, size_t end_pos) {
+// Parse a single entry (file or directory) and return true if successful
+bool PakReader::parse_single_entry(std::istream& stream, const std::string& parent_path, size_t end_pos) {
+    if (static_cast<size_t>(stream.tellg()) >= end_pos) return false;
+    
+    // Read entry type
+    uint8_t entry_type;
+    stream.read(reinterpret_cast<char*>(&entry_type), 1);
+    if (stream.gcount() < 1) return false;
+    
+    // Read name length  
+    uint8_t name_len;
+    stream.read(reinterpret_cast<char*>(&name_len), 1);
+    if (stream.gcount() < 1 || name_len == 0 || name_len > 255) return false;
+    
+    // Read name
+    std::string name(name_len, '\0');
+    stream.read(name.data(), name_len);
+    if (stream.gcount() < name_len) return false;
+    
+    // Build full path
+    std::string full_path = parent_path.empty() ? name : parent_path + "/" + name;
+    
+    if (entry_type == ENTRY_TYPE_DIRECTORY) {
+        // Directory entry - read child count and parse children
+        uint32_t child_count = read_uint32_le(stream);
+        parse_directory_contents(stream, full_path, end_pos, static_cast<int>(child_count));
+    }
+    else if (entry_type == ENTRY_TYPE_FILE) {
+        // File entry
+        PakEntry entry;
+        entry.path = full_path;
+        entry.offset = read_uint32_le(stream);
+        entry.size = read_uint32_le(stream);
+        entry.original_size = read_uint32_le(stream);
+        read_uint32_le(stream); // unknown1
+        uint32_t compression = read_uint32_be(stream);
+        entry.compression = static_cast<PakCompression>(compression);
+        stream.seekg(4, std::ios::cur); // unknown2
+        
+        entries_.push_back(entry);
+    }
+    
+    return true;
+}
+
+// Parse directory contents (children of a directory)
+// If child_count is -1, parse until end_pos (for root level)
+void PakReader::parse_directory_contents(std::istream& stream, const std::string& dir_path, 
+                                         size_t end_pos, int child_count) {
+    int parsed = 0;
     while (static_cast<size_t>(stream.tellg()) < end_pos) {
-        // Read entry type
-        uint8_t entry_type;
-        stream.read(reinterpret_cast<char*>(&entry_type), 1);
-        if (stream.gcount() < 1) break;
+        // If we have a specific count, stop when reached
+        if (child_count >= 0 && parsed >= child_count) break;
         
-        // Read name length
-        uint8_t name_len;
-        stream.read(reinterpret_cast<char*>(&name_len), 1);
-        if (stream.gcount() < 1 || name_len == 0 || name_len > 255) break;
-        
-        // Read name
-        std::string name(name_len, '\0');
-        stream.read(name.data(), name_len);
-        if (stream.gcount() < name_len) break;
-        
-        // Build full path
-        std::string full_path = parent_path.empty() ? name : parent_path + "/" + name;
-        
-        if (entry_type == ENTRY_TYPE_DIRECTORY) {
-            // Directory entry
-            uint32_t child_count = read_uint32_le(stream);
-            
-            // Recursively parse children
-            for (uint32_t i = 0; i < child_count && static_cast<size_t>(stream.tellg()) < end_pos; ++i) {
-                // Read child entry type
-                uint8_t child_type;
-                stream.read(reinterpret_cast<char*>(&child_type), 1);
-                if (stream.gcount() < 1) break;
-                
-                // Read child name length
-                uint8_t child_name_len;
-                stream.read(reinterpret_cast<char*>(&child_name_len), 1);
-                if (stream.gcount() < 1 || child_name_len == 0) break;
-                
-                // Read child name
-                std::string child_name(child_name_len, '\0');
-                stream.read(child_name.data(), child_name_len);
-                if (stream.gcount() < child_name_len) break;
-                
-                std::string child_full_path = full_path + "/" + child_name;
-                
-                if (child_type == ENTRY_TYPE_DIRECTORY) {
-                    // Nested directory - recurse
-                    uint32_t grandchild_count = read_uint32_le(stream);
-                    
-                    // Parse grandchildren inline
-                    for (uint32_t j = 0; j < grandchild_count && static_cast<size_t>(stream.tellg()) < end_pos; ++j) {
-                        // Use helper to parse single entry
-                        size_t pos_before = stream.tellg();
-                        parse_entry_recursive(stream, child_full_path, end_pos);
-                        // Break after one entry since parse_entry_recursive handles one at a time
-                        if (stream.tellg() == pos_before) break;
-                    }
-                }
-                else if (child_type == ENTRY_TYPE_FILE) {
-                    // File entry
-                    PakEntry entry;
-                    entry.path = child_full_path;
-                    entry.offset = read_uint32_le(stream);
-                    entry.size = read_uint32_le(stream);
-                    entry.original_size = read_uint32_le(stream);
-                    read_uint32_le(stream); // unknown1
-                    uint32_t compression = read_uint32_be(stream);
-                    entry.compression = static_cast<PakCompression>(compression);
-                    stream.seekg(4, std::ios::cur); // unknown2
-                    
-                    entries_.push_back(entry);
-                }
-            }
-        }
-        else if (entry_type == ENTRY_TYPE_FILE) {
-            // File entry at root level
-            PakEntry entry;
-            entry.path = full_path;
-            entry.offset = read_uint32_le(stream);
-            entry.size = read_uint32_le(stream);
-            entry.original_size = read_uint32_le(stream);
-            read_uint32_le(stream); // unknown1
-            uint32_t compression = read_uint32_be(stream);
-            entry.compression = static_cast<PakCompression>(compression);
-            stream.seekg(4, std::ios::cur); // unknown2
-            
-            entries_.push_back(entry);
-        }
+        if (!parse_single_entry(stream, dir_path, end_pos)) break;
+        parsed++;
     }
 }
 

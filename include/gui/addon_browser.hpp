@@ -44,6 +44,7 @@ private:
     fs::path current_folder_;
     char search_filter_[256] = {};
     int selected_index_ = -1;
+    int source_index_ = 0;  // 0 = mods, 1 = game addons
 
     SelectCallback on_select_;
 

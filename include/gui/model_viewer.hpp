@@ -13,12 +13,26 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_map>
 #include <cstdint>
 #include <functional>
+#include <future>
+#include <atomic>
+#include <mutex>
 
 namespace enfusion {
 
 class AddonExtractor;
+
+/**
+ * Cached texture entry to avoid reloading same texture for multiple materials
+ */
+struct CachedTexture {
+    uint32_t gl_texture_id = 0;  // OpenGL texture handle
+    int width = 0;
+    int height = 0;
+    size_t ref_count = 0;        // Number of materials using this texture
+};
 
 /**
  * Panel for viewing XOB 3D models.
@@ -72,7 +86,7 @@ private:
 
     std::unique_ptr<Camera> camera_;
     std::unique_ptr<MeshRenderer> renderer_;
-    std::unique_ptr<XobMesh> current_mesh_;
+    std::shared_ptr<XobMesh> current_mesh_;
     std::filesystem::path current_path_;
     std::string model_name_;
 
@@ -96,6 +110,12 @@ private:
     bool model_loaded_ = false;
     bool loading_ = false;
     std::string error_message_;
+    
+    // Async loading
+    std::future<std::shared_ptr<XobMesh>> load_future_;
+    std::atomic<float> load_progress_{0.0f};
+    std::atomic<bool> load_cancelled_{false};
+    mutable std::mutex load_mutex_;
 
     // Framebuffer
     uint32_t fbo_ = 0;
@@ -110,6 +130,10 @@ private:
     
     // Per-material textures (material_index -> texture_id)
     std::map<size_t, uint32_t> material_diffuse_textures_;
+    
+    // Texture cache: path (lowercase) -> cached texture info
+    // Prevents loading same texture multiple times for different materials
+    std::unordered_map<std::string, CachedTexture> texture_cache_;
     
     // Texture browser
     std::vector<std::string> available_textures_;
@@ -126,12 +150,22 @@ private:
     
     void load_material_textures();
     void destroy_textures();
+    void clear_texture_cache();  // Clean up texture cache
     void apply_texture(const std::string& path);
     void apply_texture_to_material(size_t material_index, const std::string& path);
     bool try_load_texture_data(size_t material_index, const std::vector<uint8_t>& data, const std::string& path);
+    
+    // Texture cache helpers
+    uint32_t get_cached_texture(const std::string& path) const;
+    void add_texture_to_cache(const std::string& path, uint32_t texture_id, int width, int height);
+    
     void render_texture_browser();
     void render_material_editor();
     void filter_textures();
+    
+    // Improved texture matching - finds textures by fuzzy name matching
+    std::string find_best_texture_match(const std::string& material_name, 
+                                        const std::string& material_dir) const;
 };
 
 } // namespace enfusion

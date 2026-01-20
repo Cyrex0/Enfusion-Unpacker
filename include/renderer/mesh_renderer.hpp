@@ -33,7 +33,7 @@ public:
     void init();
     void cleanup();
 
-    void set_mesh(const XobMesh* mesh);
+    void set_mesh(std::shared_ptr<const XobMesh> mesh);
     void set_texture(uint32_t texture_id) { fallback_texture_ = texture_id; }
     void set_material_texture(size_t material_index, uint32_t texture_id);
     void set_material_enabled(size_t material_index, bool enabled);
@@ -63,6 +63,9 @@ private:
     void render_mesh(const glm::mat4& view, const glm::mat4& projection);
     void render_grid(const glm::mat4& view, const glm::mat4& projection);
     void render_normals(const glm::mat4& view, const glm::mat4& projection);
+    
+    // Frustum culling helper
+    bool is_visible_in_frustum(const glm::mat4& mvp, const glm::vec3& min, const glm::vec3& max) const;
 
     // Mesh buffers
     uint32_t vao_ = 0;
@@ -74,14 +77,19 @@ private:
     uint32_t grid_vbo_ = 0;
 
     // Mesh data
-    const XobMesh* mesh_ = nullptr;
+    std::shared_ptr<const XobMesh> mesh_;
     size_t vertex_count_ = 0;
     size_t index_count_ = 0;
+    
+    // Bounding box (computed on mesh upload)
+    glm::vec3 bounds_min_{0.0f};
+    glm::vec3 bounds_max_{0.0f};
 
     // Render options
     bool show_grid_ = true;
     bool show_normals_ = false;
     bool wireframe_ = false;
+    bool frustum_cull_ = true;  // Enable frustum culling by default
     float grid_size_ = 10.0f;
     int current_lod_ = 0;
     int highlighted_material_ = -1;  // -1 = none

@@ -3,6 +3,7 @@
  */
 
 #include "gui/addon_browser.hpp"
+#include "gui/app.hpp"
 
 #include <imgui.h>
 #include <algorithm>
@@ -87,6 +88,31 @@ void AddonBrowser::apply_filter() {
 }
 
 void AddonBrowser::render() {
+    // Source selector (Mods vs Game Addons)
+    auto& settings = App::instance().settings();
+    bool has_mods = !settings.mods_install_path.empty() && fs::exists(settings.mods_install_path);
+    bool has_game = !settings.game_install_path.empty();
+    fs::path game_addons = settings.game_install_path / "Addons";
+    bool has_game_addons = has_game && fs::exists(game_addons);
+    
+    if (has_mods || has_game_addons) {
+        const char* sources[] = { "Workshop Mods", "Game Addons" };
+        ImGui::SetNextItemWidth(150);
+        if (ImGui::Combo("##Source", &source_index_, sources, IM_ARRAYSIZE(sources))) {
+            // Switch source
+            if (source_index_ == 0 && has_mods) {
+                set_addons_path(settings.mods_install_path);
+            } else if (source_index_ == 1 && has_game_addons) {
+                set_addons_path(game_addons);
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Refresh")) {
+            refresh();
+        }
+        ImGui::Spacing();
+    }
+    
     // Search bar
     ImGui::SetNextItemWidth(-1);
     if (ImGui::InputTextWithHint("##AddonSearch", "Search addons...", search_filter_, sizeof(search_filter_))) {
@@ -98,7 +124,8 @@ void AddonBrowser::render() {
     // Addons list
     if (addons_path_.empty()) {
         ImGui::TextDisabled("No addons folder set.");
-        ImGui::TextDisabled("File > Open Addons Folder...");
+        ImGui::TextDisabled("Go to Tools > Settings > Paths");
+        ImGui::TextDisabled("to configure game and mods paths.");
         return;
     }
 

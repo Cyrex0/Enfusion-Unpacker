@@ -56,7 +56,20 @@ private:
 
     AppSettings settings_;
     std::string status_;
+    
+    // Loading state
+    bool is_loading_ = false;
+    std::string loading_message_;
+    
+public:
+    void set_loading(bool loading, const std::string& msg = "") { 
+        is_loading_ = loading; 
+        loading_message_ = msg;
+    }
+    bool is_loading() const { return is_loading_; }
+    const std::string& loading_message() const { return loading_message_; }
 
+private:
     int width_ = 1600;
     int height_ = 900;
     bool running_ = false;

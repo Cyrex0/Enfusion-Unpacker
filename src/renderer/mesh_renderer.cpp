@@ -42,8 +42,8 @@ void MeshRenderer::cleanup() {
     }
 }
 
-void MeshRenderer::set_mesh(const XobMesh* mesh) {
-    mesh_ = mesh;
+void MeshRenderer::set_mesh(std::shared_ptr<const XobMesh> mesh) {
+    mesh_ = std::move(mesh);
     if (mesh_) {
         upload_mesh();
     }
@@ -54,6 +54,14 @@ void MeshRenderer::upload_mesh() {
     
     std::cerr << "[Renderer] Uploading mesh: verts=" << mesh_->vertices.size() 
               << " indices=" << mesh_->indices.size() << "\n";
+    
+    // Compute bounding box
+    bounds_min_ = glm::vec3(FLT_MAX);
+    bounds_max_ = glm::vec3(-FLT_MAX);
+    for (const auto& v : mesh_->vertices) {
+        bounds_min_ = glm::min(bounds_min_, v.position);
+        bounds_max_ = glm::max(bounds_max_, v.position);
+    }
     
     // Debug: Print first few vertices with UVs
     for (size_t i = 0; i < std::min(size_t(5), mesh_->vertices.size()); i++) {
@@ -170,8 +178,16 @@ void MeshRenderer::clear_material_textures() {
 }
 
 void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projection) {
+    glm::mat4 model = glm::mat4(1.0f);
+    glm::mat4 mvp = projection * view * model;
+    
+    // Frustum culling check
+    if (frustum_cull_ && !is_visible_in_frustum(mvp, bounds_min_, bounds_max_)) {
+        return;  // Mesh is completely outside frustum
+    }
+    
     mesh_shader_->use();
-    mesh_shader_->set_mat4("model", glm::mat4(1.0f));
+    mesh_shader_->set_mat4("model", model);
     mesh_shader_->set_mat4("view", view);
     mesh_shader_->set_mat4("projection", projection);
     mesh_shader_->set_vec3("lightDir", glm::normalize(glm::vec3(0.5f, -1.0f, 0.3f)));
@@ -282,6 +298,66 @@ void MeshRenderer::render_grid(const glm::mat4& view, const glm::mat4& projectio
 void MeshRenderer::render_normals(const glm::mat4& view, const glm::mat4& projection) {
     // Would need separate normal visualization shader
     // For now, skip this
+}
+
+bool MeshRenderer::is_visible_in_frustum(const glm::mat4& mvp, const glm::vec3& min, const glm::vec3& max) const {
+    // Test all 8 corners of the bounding box against the frustum
+    // If all corners are outside any single frustum plane, the box is culled
+    glm::vec4 corners[8] = {
+        mvp * glm::vec4(min.x, min.y, min.z, 1.0f),
+        mvp * glm::vec4(max.x, min.y, min.z, 1.0f),
+        mvp * glm::vec4(min.x, max.y, min.z, 1.0f),
+        mvp * glm::vec4(max.x, max.y, min.z, 1.0f),
+        mvp * glm::vec4(min.x, min.y, max.z, 1.0f),
+        mvp * glm::vec4(max.x, min.y, max.z, 1.0f),
+        mvp * glm::vec4(min.x, max.y, max.z, 1.0f),
+        mvp * glm::vec4(max.x, max.y, max.z, 1.0f)
+    };
+    
+    // Check each frustum plane (in clip space: -w <= x,y,z <= w)
+    // Left plane: x >= -w
+    bool all_outside = true;
+    for (int i = 0; i < 8; ++i) {
+        if (corners[i].x >= -corners[i].w) { all_outside = false; break; }
+    }
+    if (all_outside) return false;
+    
+    // Right plane: x <= w
+    all_outside = true;
+    for (int i = 0; i < 8; ++i) {
+        if (corners[i].x <= corners[i].w) { all_outside = false; break; }
+    }
+    if (all_outside) return false;
+    
+    // Bottom plane: y >= -w
+    all_outside = true;
+    for (int i = 0; i < 8; ++i) {
+        if (corners[i].y >= -corners[i].w) { all_outside = false; break; }
+    }
+    if (all_outside) return false;
+    
+    // Top plane: y <= w
+    all_outside = true;
+    for (int i = 0; i < 8; ++i) {
+        if (corners[i].y <= corners[i].w) { all_outside = false; break; }
+    }
+    if (all_outside) return false;
+    
+    // Near plane: z >= -w (or z >= 0 depending on depth range)
+    all_outside = true;
+    for (int i = 0; i < 8; ++i) {
+        if (corners[i].z >= -corners[i].w) { all_outside = false; break; }
+    }
+    if (all_outside) return false;
+    
+    // Far plane: z <= w
+    all_outside = true;
+    for (int i = 0; i < 8; ++i) {
+        if (corners[i].z <= corners[i].w) { all_outside = false; break; }
+    }
+    if (all_outside) return false;
+    
+    return true;  // At least partially visible
 }
 
 } // namespace enfusion
