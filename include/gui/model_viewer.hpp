@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <map>
 #include <cstdint>
 #include <functional>
 
@@ -107,6 +108,9 @@ private:
     std::function<std::vector<uint8_t>(const std::string&)> texture_loader_;
     uint32_t diffuse_texture_ = 0;
     
+    // Per-material textures (material_index -> texture_id)
+    std::map<size_t, uint32_t> material_diffuse_textures_;
+    
     // Texture browser
     std::vector<std::string> available_textures_;
     std::vector<std::string> filtered_textures_;
@@ -115,10 +119,18 @@ private:
     int selected_texture_idx_ = -1;
     bool show_texture_browser_ = false;
     
+    // Material editor
+    bool show_material_editor_ = true;
+    int selected_material_idx_ = -1;
+    int highlighted_material_idx_ = -1;
+    
     void load_material_textures();
     void destroy_textures();
     void apply_texture(const std::string& path);
+    void apply_texture_to_material(size_t material_index, const std::string& path);
+    bool try_load_texture_data(size_t material_index, const std::vector<uint8_t>& data, const std::string& path);
     void render_texture_browser();
+    void render_material_editor();
     void filter_textures();
 };
 

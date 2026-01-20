@@ -25,20 +25,22 @@ static inline uint32_t read_u32_le(const uint8_t* p) {
 }
 
 // BC1 (DXT1) block decoder - 8 bytes per 4x4 block
+// Note: DDS stores colors in BGR565 format, but we output RGBA for OpenGL
 static void decode_bc1_block(const uint8_t* block, uint8_t* output, int stride) {
     uint16_t c0 = block[0] | (block[1] << 8);
     uint16_t c1 = block[2] | (block[3] << 8);
     
-    // Expand 5:6:5 to 8:8:8
+    // Expand 5:6:5 BGR to 8:8:8:8 RGBA
+    // DDS pixel format: B in bits 0-4, G in bits 5-10, R in bits 11-15
     uint8_t colors[4][4];
-    colors[0][0] = ((c0 >> 11) & 0x1F) * 255 / 31;
-    colors[0][1] = ((c0 >> 5) & 0x3F) * 255 / 63;
-    colors[0][2] = (c0 & 0x1F) * 255 / 31;
+    colors[0][0] = ((c0 >> 11) & 0x1F) * 255 / 31;  // R
+    colors[0][1] = ((c0 >> 5) & 0x3F) * 255 / 63;   // G
+    colors[0][2] = (c0 & 0x1F) * 255 / 31;          // B
     colors[0][3] = 255;
     
-    colors[1][0] = ((c1 >> 11) & 0x1F) * 255 / 31;
-    colors[1][1] = ((c1 >> 5) & 0x3F) * 255 / 63;
-    colors[1][2] = (c1 & 0x1F) * 255 / 31;
+    colors[1][0] = ((c1 >> 11) & 0x1F) * 255 / 31;  // R
+    colors[1][1] = ((c1 >> 5) & 0x3F) * 255 / 63;   // G
+    colors[1][2] = (c1 & 0x1F) * 255 / 31;          // B
     colors[1][3] = 255;
     
     if (c0 > c1) {

@@ -55,11 +55,13 @@ void MeshRenderer::upload_mesh() {
     std::cerr << "[Renderer] Uploading mesh: verts=" << mesh_->vertices.size() 
               << " indices=" << mesh_->indices.size() << "\n";
     
-    // Debug: Print first few vertices
-    for (size_t i = 0; i < std::min(size_t(3), mesh_->vertices.size()); i++) {
+    // Debug: Print first few vertices with UVs
+    for (size_t i = 0; i < std::min(size_t(5), mesh_->vertices.size()); i++) {
         const auto& v = mesh_->vertices[i];
         std::cerr << "[Renderer]   Vert " << i << ": pos=(" << v.position.x << ", " 
-                  << v.position.y << ", " << v.position.z << ")\n";
+                  << v.position.y << ", " << v.position.z << ") "
+                  << "uv=(" << v.uv.x << ", " << v.uv.y << ") "
+                  << "normal=(" << v.normal.x << ", " << v.normal.y << ", " << v.normal.z << ")\n";
     }
     
     // Clean up old buffers
@@ -155,6 +157,18 @@ void MeshRenderer::render(const glm::mat4& view, const glm::mat4& projection) {
     }
 }
 
+void MeshRenderer::set_material_texture(size_t material_index, uint32_t texture_id) {
+    material_textures_[material_index].diffuse = texture_id;
+}
+
+void MeshRenderer::set_material_enabled(size_t material_index, bool enabled) {
+    material_textures_[material_index].enabled = enabled;
+}
+
+void MeshRenderer::clear_material_textures() {
+    material_textures_.clear();
+}
+
 void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projection) {
     mesh_shader_->use();
     mesh_shader_->set_mat4("model", glm::mat4(1.0f));
@@ -162,17 +176,6 @@ void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projectio
     mesh_shader_->set_mat4("projection", projection);
     mesh_shader_->set_vec3("lightDir", glm::normalize(glm::vec3(0.5f, -1.0f, 0.3f)));
     mesh_shader_->set_vec3("lightColor", glm::vec3(1.0f));
-    mesh_shader_->set_vec3("objectColor", glm::vec3(0.8f, 0.8f, 0.85f));
-    
-    // Bind diffuse texture if available
-    if (diffuse_texture_ != 0) {
-        mesh_shader_->set_bool("useTexture", true);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, diffuse_texture_);
-        mesh_shader_->set_int("diffuseMap", 0);
-    } else {
-        mesh_shader_->set_bool("useTexture", false);
-    }
     
     glBindVertexArray(vao_);
     
@@ -180,19 +183,74 @@ void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projectio
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
     }
     
-    // Determine index range based on LOD
-    size_t index_offset = 0;
-    size_t index_count = index_count_;
-    
-    if (!mesh_->lods.empty() && current_lod_ < static_cast<int>(mesh_->lods.size())) {
-        index_offset = mesh_->lods[current_lod_].index_offset;
-        index_count = mesh_->lods[current_lod_].index_count;
+    // Render per-material if we have material ranges
+    if (mesh_ && !mesh_->material_ranges.empty()) {
+        // Render each material range separately
+        for (const auto& range : mesh_->material_ranges) {
+            // Check if material is enabled
+            auto it = material_textures_.find(range.material_index);
+            if (it != material_textures_.end() && !it->second.enabled) {
+                continue; // Skip disabled materials
+            }
+            
+            // Set object color based on whether this material is highlighted
+            if (highlighted_material_ >= 0 && range.material_index != static_cast<uint32_t>(highlighted_material_)) {
+                // Dim non-highlighted materials
+                mesh_shader_->set_vec3("objectColor", glm::vec3(0.4f, 0.4f, 0.45f));
+            } else {
+                mesh_shader_->set_vec3("objectColor", glm::vec3(0.8f, 0.8f, 0.85f));
+            }
+            
+            // Bind per-material texture if available
+            uint32_t tex = 0;
+            if (it != material_textures_.end() && it->second.diffuse != 0) {
+                tex = it->second.diffuse;
+            } else {
+                tex = fallback_texture_;  // Use fallback
+            }
+            
+            if (tex != 0) {
+                mesh_shader_->set_bool("useTexture", true);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, tex);
+                mesh_shader_->set_int("diffuseMap", 0);
+            } else {
+                mesh_shader_->set_bool("useTexture", false);
+            }
+            
+            // Draw this material's triangles
+            glDrawElements(GL_TRIANGLES, 
+                          static_cast<GLsizei>(range.index_count()),
+                          GL_UNSIGNED_INT,
+                          reinterpret_cast<void*>(range.index_start() * sizeof(uint32_t)));
+        }
+    } else {
+        // Fallback: render entire mesh with single texture
+        mesh_shader_->set_vec3("objectColor", glm::vec3(0.8f, 0.8f, 0.85f));
+        
+        if (fallback_texture_ != 0) {
+            mesh_shader_->set_bool("useTexture", true);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, fallback_texture_);
+            mesh_shader_->set_int("diffuseMap", 0);
+        } else {
+            mesh_shader_->set_bool("useTexture", false);
+        }
+        
+        // Determine index range based on LOD
+        size_t index_offset = 0;
+        size_t index_count = index_count_;
+        
+        if (!mesh_->lods.empty() && current_lod_ < static_cast<int>(mesh_->lods.size())) {
+            index_offset = mesh_->lods[current_lod_].index_offset;
+            index_count = mesh_->lods[current_lod_].index_count;
+        }
+        
+        glDrawElements(GL_TRIANGLES, 
+                       static_cast<GLsizei>(index_count),
+                       GL_UNSIGNED_INT,
+                       reinterpret_cast<void*>(index_offset * sizeof(uint32_t)));
     }
-    
-    glDrawElements(GL_TRIANGLES, 
-                   static_cast<GLsizei>(index_count),
-                   GL_UNSIGNED_INT,
-                   reinterpret_cast<void*>(index_offset * sizeof(uint32_t)));
     
     if (wireframe_) {
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);

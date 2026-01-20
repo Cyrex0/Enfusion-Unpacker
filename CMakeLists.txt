@@ -47,6 +47,7 @@ set(CORE_SOURCES
     src/core/pak_reader.cpp
     src/core/rdb_parser.cpp
     src/core/manifest.cpp
+    src/core/pak_manager.cpp
 )
 
 # Source files - Formats

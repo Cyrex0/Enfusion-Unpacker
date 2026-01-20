@@ -5,6 +5,7 @@
 #pragma once
 
 #include "enfusion/types.hpp"
+#include "enfusion/mesh_converter.hpp"
 #include <filesystem>
 #include <functional>
 #include <vector>
@@ -48,6 +49,12 @@ private:
     bool convert_meshes_ = true;
     bool keep_originals_ = false;
     bool preserve_structure_ = true;
+    
+    // Mesh export format
+    ExportFormat mesh_format_ = ExportFormat::OBJ;
+    bool export_normals_ = true;
+    bool export_uvs_ = true;
+    bool export_materials_ = true;
 
     // Batch mode options
     bool export_textures_ = true;

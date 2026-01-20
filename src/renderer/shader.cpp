@@ -194,18 +194,32 @@ uniform bool useTexture;
 uniform sampler2D diffuseMap;
 
 void main() {
-    // Ambient
-    float ambientStrength = 0.3;
+    // Ambient - high for visibility
+    float ambientStrength = 0.5;
     vec3 ambient = ambientStrength * lightColor;
     
-    // Diffuse
+    // Diffuse lighting
     vec3 norm = normalize(Normal);
     float diff = max(dot(norm, -lightDir), 0.0);
-    vec3 diffuse = diff * lightColor;
+    vec3 diffuse = diff * lightColor * 0.7;
     
     vec3 color = objectColor;
     if (useTexture) {
-        color = texture(diffuseMap, TexCoord).rgb;
+        vec4 texColor = texture(diffuseMap, TexCoord);
+        // For MCR textures: R=Metallic, G=Color(albedo), B=Roughness
+        // The G channel contains the grayscale albedo
+        // Use G channel as the base color, significantly boosted
+        float albedo = texColor.g;
+        
+        // Create color from albedo - boost it significantly
+        // MCR albedo values are typically in 0.1-0.4 range
+        color = vec3(albedo * 3.0);
+        
+        // Add slight color variation from R/B for visual interest  
+        color.r += texColor.r * 0.1;
+        color.b += texColor.b * 0.1;
+        
+        color = clamp(color, 0.0, 1.0);
     }
     
     vec3 result = (ambient + diffuse) * color;

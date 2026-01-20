@@ -57,11 +57,17 @@ struct LzoDescriptor {
 
 /**
  * Material range for mesh rendering.
+ * Defines which triangles use a specific material.
  */
 struct MaterialRange {
-    uint32_t material_index = 0;
-    uint32_t start_index = 0;
-    uint32_t index_count = 0;
+    uint32_t material_index = 0;    // Index into materials array
+    uint32_t triangle_start = 0;    // First triangle using this material
+    uint32_t triangle_end = 0;      // One past last triangle
+    uint32_t triangle_count = 0;    // Number of triangles
+    
+    // For rendering: convert to index buffer range
+    uint32_t index_start() const { return triangle_start * 3; }
+    uint32_t index_count() const { return triangle_count * 3; }
 };
 
 /**
@@ -92,11 +98,14 @@ struct XobLod {
  * Material reference from XOB.
  */
 struct XobMaterial {
-    std::string name;
-    std::string diffuse_texture;
-    std::string normal_texture;
-    std::string specular_texture;
-    std::string emissive_texture;
+    std::string name;               // Material name (extracted from path)
+    std::string path;               // Full path to .emat or .gamemat file
+    std::string diffuse_texture;    // Diffuse/albedo texture path
+    std::string normal_texture;     // Normal map path
+    std::string specular_texture;   // Specular/roughness map path
+    std::string emissive_texture;   // Emissive texture path
+    uint32_t gl_diffuse = 0;        // OpenGL texture handle for diffuse
+    uint32_t gl_normal = 0;         // OpenGL texture handle for normal
 };
 
 /**
@@ -107,6 +116,7 @@ struct XobMesh {
     std::vector<uint32_t> indices;
     std::vector<XobLod> lods;
     std::vector<XobMaterial> materials;
+    std::vector<MaterialRange> material_ranges;  // Which triangles use which material
     uint32_t version = 0;
     glm::vec3 bounds_min{0.0f};
     glm::vec3 bounds_max{0.0f};

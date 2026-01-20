@@ -4,12 +4,12 @@
  * Enfusion Unpacker - Addon Extractor
  * 
  * Extracts files from Enfusion addon packages by combining:
- * - RDB (resource database) for file paths and sizes
- * - Manifest JSON for fragment offsets
- * - PAK file for actual data
+ * - RDB (resource database) for file paths
+ * - PAK file for actual data (uses PakReader for correct file mapping)
  */
 
 #include "enfusion/types.hpp"
+#include "enfusion/pak_reader.hpp"
 #include <string>
 #include <vector>
 #include <filesystem>
@@ -17,6 +17,7 @@
 #include <map>
 #include <optional>
 #include <tuple>
+#include <memory>
 
 namespace enfusion {
 
@@ -88,26 +89,15 @@ public:
 
 private:
     bool parse_rdb();
-    bool load_manifest();
-    void build_decompressed_index();
-    void index_special_fragments();
-    std::optional<std::tuple<uint64_t, uint32_t, bool>> find_file_location(uint32_t file_size, const std::string& path);
 
     std::filesystem::path addon_dir_;
     std::filesystem::path pak_path_;
     std::filesystem::path rdb_path_;
-    std::filesystem::path manifest_path_;
 
-    std::vector<uint8_t> pak_data_;
-    std::vector<RdbFile> files_;
-    std::vector<ManifestFragment> fragments_;
-
-    std::map<uint32_t, std::vector<int>> size_to_fragments_;
-    std::map<size_t, std::vector<std::tuple<int, uint64_t, uint32_t>>> decompressed_sizes_;
+    // PakReader for correct file data access
+    std::unique_ptr<PakReader> pak_reader_;
     
-    // Special fragment indices
-    std::vector<int> xob_fragments_;
-    std::vector<int> prefab_fragments_;
+    std::vector<RdbFile> files_;
 
     bool loaded_ = false;
 };

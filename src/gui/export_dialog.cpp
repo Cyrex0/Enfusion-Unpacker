@@ -73,8 +73,25 @@ void ExportDialog::render_content() {
     ImGui::Checkbox("Convert textures to PNG", &convert_textures_);
     widgets::HelpMarker("Convert EDDS textures to standard PNG format");
 
-    ImGui::Checkbox("Convert meshes to OBJ", &convert_meshes_);
-    widgets::HelpMarker("Convert XOB meshes to Wavefront OBJ format");
+    ImGui::Checkbox("Convert meshes to OBJ/FBX", &convert_meshes_);
+    widgets::HelpMarker("Convert XOB meshes to OBJ or FBX format");
+    
+    if (convert_meshes_) {
+        ImGui::Indent();
+        
+        // Format selection
+        const char* format_items[] = { "OBJ (Wavefront)", "FBX (Autodesk)" };
+        int current_format = (mesh_format_ == ExportFormat::FBX) ? 1 : 0;
+        if (ImGui::Combo("Mesh Format", &current_format, format_items, 2)) {
+            mesh_format_ = (current_format == 1) ? ExportFormat::FBX : ExportFormat::OBJ;
+        }
+        
+        ImGui::Checkbox("Export Normals", &export_normals_);
+        ImGui::Checkbox("Export UVs", &export_uvs_);
+        ImGui::Checkbox("Export Materials", &export_materials_);
+        
+        ImGui::Unindent();
+    }
 
     ImGui::Checkbox("Keep original files", &keep_originals_);
     widgets::HelpMarker("Keep the original game files alongside converted ones");

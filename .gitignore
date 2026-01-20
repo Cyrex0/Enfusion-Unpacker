@@ -32,3 +32,6 @@
 *.app
 /build
 /pyref
+/test_extract
+*.bak
+*.py

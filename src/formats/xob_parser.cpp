@@ -243,7 +243,9 @@ static std::vector<uint8_t> extract_lod_region_internal(
 
 /**
  * Parse mesh from LOD region
- * Layout: Index1 -> Index2 -> Positions -> Normals(4 bytes each) -> UVs(4 bytes each)
+ * 
+ * FIXED Layout from Python: Positions -> Normals(4) -> UVs(4) -> [Tangents(4)] -> [Extra(8)]
+ * UVs come directly after normals, NOT after tangents.
  */
 static bool parse_mesh_from_region(
     const std::vector<uint8_t>& region,
@@ -323,6 +325,8 @@ static bool parse_mesh_from_region(
     
     // Normals start after positions (4 bytes per vertex - packed signed bytes)
     size_t normal_offset = pos_offset + vertex_count * position_stride;
+    std::cerr << "[XOB] normal_offset=" << normal_offset << "\n";
+    
     for (uint32_t i = 0; i < vertex_count && i < mesh.vertices.size(); i++) {
         size_t off = normal_offset + i * 4;
         if (off + 4 > region.size()) break;
@@ -331,15 +335,33 @@ static bool parse_mesh_from_region(
         int8_t ny = static_cast<int8_t>(region[off + 1]);
         int8_t nz = static_cast<int8_t>(region[off + 2]);
         
-        mesh.vertices[i].normal.x = static_cast<float>(nx) / 127.0f;
-        mesh.vertices[i].normal.y = static_cast<float>(ny) / 127.0f;
-        mesh.vertices[i].normal.z = static_cast<float>(nz) / 127.0f;
+        glm::vec3 normal(
+            static_cast<float>(nx) / 127.0f,
+            static_cast<float>(ny) / 127.0f,
+            static_cast<float>(nz) / 127.0f
+        );
+        
+        // Normalize the normal vector
+        float len = glm::length(normal);
+        if (len > 0.001f) {
+            normal /= len;
+        } else {
+            normal = glm::vec3(0.0f, 1.0f, 0.0f);  // Default up
+        }
+        
+        mesh.vertices[i].normal = normal;
     }
     
-    // UVs start after normals (4 bytes per vertex - 2x uint16)
+    // UVs come directly after normals (FIXED layout: pos -> normals(4) -> UVs(8) -> tangent -> extra)
+    // UVs are 8 bytes per vertex: 4 bytes for UV0 (diffuse), 4 bytes for UV1 (lightmap/unused)
+    // We only need UV0 which is the first 4 bytes
     size_t uv_offset = normal_offset + vertex_count * 4;
+    size_t uv_stride = 8;  // Two UV channels: UV0 (4 bytes) + UV1 (4 bytes)
+    std::cerr << "[XOB] uv_offset=" << uv_offset << " uv_stride=" << uv_stride << " region_size=" << region.size() << "\n";
+    
+    size_t valid_uvs = 0;
     for (uint32_t i = 0; i < vertex_count && i < mesh.vertices.size(); i++) {
-        size_t off = uv_offset + i * 4;
+        size_t off = uv_offset + i * uv_stride;  // Use 8-byte stride
         if (off + 4 > region.size()) break;
         
         uint16_t u_raw = read_u16_le(region.data() + off);
@@ -347,6 +369,20 @@ static bool parse_mesh_from_region(
         
         mesh.vertices[i].uv.x = static_cast<float>(u_raw) / 65535.0f;
         mesh.vertices[i].uv.y = 1.0f - static_cast<float>(v_raw) / 65535.0f; // Flip V
+        valid_uvs++;
+        
+        // Debug first few raw values
+        if (i < 5) {
+            std::cerr << "[XOB] UV[" << i << "] raw: u=" << u_raw << " v=" << v_raw 
+                      << " -> (" << mesh.vertices[i].uv.x << ", " << mesh.vertices[i].uv.y << ")\n";
+        }
+    }
+    std::cerr << "[XOB] Parsed " << valid_uvs << " UVs\n";
+    
+    // Debug: show first few UVs
+    uint32_t debug_count = (vertex_count < 5) ? vertex_count : 5;
+    for (uint32_t i = 0; i < debug_count && i < mesh.vertices.size(); i++) {
+        std::cerr << "[XOB] UV[" << i << "] = (" << mesh.vertices[i].uv.x << ", " << mesh.vertices[i].uv.y << ")\n";
     }
     
     return !mesh.vertices.empty() && !mesh.indices.empty();
@@ -395,10 +431,11 @@ static std::vector<XobMaterial> extract_materials_from_head(const uint8_t* data,
                     
                     XobMaterial mat;
                     mat.name = name;
+                    mat.path = path;
                     mat.diffuse_texture = path;
                     materials.push_back(mat);
                     
-                    std::cerr << "[XOB] Found material: " << name << " path=" << path << "\n";
+                    std::cerr << "[XOB] Found material " << materials.size()-1 << ": " << name << " path=" << path << "\n";
                     
                     i = path_end - 1; // Skip past this material
                 }
@@ -407,6 +444,122 @@ static std::vector<XobMaterial> extract_materials_from_head(const uint8_t* data,
     }
     
     return materials;
+}
+
+/**
+ * Parse material-to-triangle ranges from XOB HEAD chunk.
+ * 
+ * Based on Python parse_material_triangle_ranges():
+ * Each material entry (except material 0) has a 0xFFFF marker preceded by:
+ * - tri_start: uint16 at offset -10 (starting triangle index)
+ * - mat_idx: uint16 at offset +2 (material index after 0xFFFF)
+ * 
+ * Material 0 covers triangles from 0 to the minimum tri_start of other materials.
+ */
+static std::vector<MaterialRange> extract_material_ranges(const uint8_t* data, size_t size, uint32_t total_triangles) {
+    std::vector<MaterialRange> result;
+    
+    // Find HEAD chunk start and LZO4 position
+    const uint8_t* head_start = nullptr;
+    size_t head_size = 0;
+    for (size_t i = 0; i + 8 < size; i++) {
+        if (data[i] == 'H' && data[i+1] == 'E' && data[i+2] == 'A' && data[i+3] == 'D') {
+            head_size = read_u32_be(data + i + 4);
+            head_start = data + i + 8;
+            break;
+        }
+    }
+    if (!head_start || head_size == 0) return result;
+    
+    // Count LZO4 descriptors
+    size_t lzo4_count = 0;
+    for (size_t i = 0; i + 4 <= head_size; i++) {
+        if (head_start[i] == 'L' && head_start[i+1] == 'Z' && 
+            head_start[i+2] == 'O' && head_start[i+3] == '4') {
+            lzo4_count++;
+            i += 115; // Skip to next potential LZO4
+        }
+    }
+    
+    if (lzo4_count == 0) return result;
+    
+    // Find first LZO4 and skip past ALL LZO4 descriptors
+    size_t lzo4_pos = SIZE_MAX;
+    for (size_t i = 0; i + 4 <= head_size; i++) {
+        if (head_start[i] == 'L' && head_start[i+1] == 'Z' && 
+            head_start[i+2] == 'O' && head_start[i+3] == '4') {
+            lzo4_pos = i;
+            break;
+        }
+    }
+    if (lzo4_pos == SIZE_MAX) return result;
+    
+    // Data after LZO4 descriptors
+    size_t after_start = lzo4_pos + (116 * lzo4_count);
+    if (after_start >= head_size) return result;
+    
+    const uint8_t* after = head_start + after_start;
+    size_t after_size = head_size - after_start;
+    
+    // Find all 0xFFFF markers
+    struct RangeEntry {
+        uint32_t mat_idx;
+        uint32_t tri_start;
+    };
+    std::vector<RangeEntry> entries;
+    
+    for (size_t pos = 10; pos + 4 <= after_size; pos++) {
+        if (after[pos] == 0xFF && after[pos+1] == 0xFF) {
+            // Parse structure: tri_start at -10, mat_idx at +2
+            uint16_t tri_start = read_u16_le(after + pos - 10);
+            uint16_t mat_idx = read_u16_le(after + pos + 2);
+            
+            // Filter garbage values
+            if (tri_start <= total_triangles) {
+                entries.push_back({mat_idx, tri_start});
+                std::cerr << "[XOB] Material range: mat=" << mat_idx << " tri_start=" << tri_start << "\n";
+            }
+            pos += 3;
+        }
+    }
+    
+    // Sort by tri_start
+    std::sort(entries.begin(), entries.end(), 
+              [](const RangeEntry& a, const RangeEntry& b) { return a.tri_start < b.tri_start; });
+    
+    // Build result with tri_end calculated
+    // Material 0 covers 0 to min(other tri_starts)
+    if (!entries.empty()) {
+        uint32_t min_start = entries[0].tri_start;
+        if (min_start > 0) {
+            MaterialRange r0;
+            r0.material_index = 0;
+            r0.triangle_start = 0;
+            r0.triangle_end = min_start;
+            r0.triangle_count = min_start;
+            result.push_back(r0);
+        }
+        
+        for (size_t i = 0; i < entries.size(); i++) {
+            MaterialRange r;
+            r.material_index = entries[i].mat_idx;
+            r.triangle_start = entries[i].tri_start;
+            r.triangle_end = (i + 1 < entries.size()) ? entries[i+1].tri_start : total_triangles;
+            r.triangle_count = r.triangle_end - r.triangle_start;
+            result.push_back(r);
+        }
+    } else {
+        // Only material 0 - covers all triangles
+        MaterialRange r0;
+        r0.material_index = 0;
+        r0.triangle_start = 0;
+        r0.triangle_end = total_triangles;
+        r0.triangle_count = total_triangles;
+        result.push_back(r0);
+    }
+    
+    std::cerr << "[XOB] Total material ranges: " << result.size() << "\n";
+    return result;
 }
 
 XobParser::XobParser(std::span<const uint8_t> data) : data_(data) {}
@@ -531,6 +684,10 @@ std::optional<XobMesh> XobParser::parse(uint32_t target_lod) {
     
     // Copy materials to mesh
     mesh.materials = materials_;
+    
+    // Extract material ranges (which triangles use which material)
+    mesh.material_ranges = extract_material_ranges(data_.data(), data_.size(), desc.triangle_count);
+    std::cerr << "[XOB] Material ranges assigned: " << mesh.material_ranges.size() << "\n";
     
     return mesh;
 }
