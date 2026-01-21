@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <atomic>
 #include <sstream>
 #include <chrono>
 #include <ctime>
@@ -64,18 +65,19 @@ public:
      */
     void set_level(LogLevel level) {
         std::lock_guard<std::mutex> lock(mutex_);
-        min_level_ = level;
+        min_level_.store(level, std::memory_order_release);
     }
     
     LogLevel get_level() const {
-        return min_level_;
+        return min_level_.load(std::memory_order_acquire);
     }
     
     /**
      * Check if a log level is enabled (for macro optimization)
+     * Thread-safe without locking for performance
      */
     bool is_enabled(LogLevel level) const {
-        return level >= min_level_;
+        return level >= min_level_.load(std::memory_order_acquire);
     }
     
     /**
@@ -237,7 +239,7 @@ private:
     }
     
     std::mutex mutex_;
-    LogLevel min_level_ = LogLevel::Debug;  // Default to Debug - all logs to file
+    std::atomic<LogLevel> min_level_{LogLevel::Debug};  // Atomic for thread-safe reads
     bool console_enabled_ = false;          // No console spam by default
     std::ofstream file_;
     std::function<void(LogLevel, const std::string&)> callback_;

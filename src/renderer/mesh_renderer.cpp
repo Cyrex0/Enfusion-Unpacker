@@ -11,6 +11,46 @@
 
 namespace enfusion {
 
+// RAII helper for OpenGL state management
+class GLStateGuard {
+public:
+    GLStateGuard(GLenum cap, bool enable) : cap_(cap), was_enabled_(glIsEnabled(cap)) {
+        if (enable && !was_enabled_) {
+            glEnable(cap_);
+        } else if (!enable && was_enabled_) {
+            glDisable(cap_);
+        }
+    }
+    ~GLStateGuard() {
+        if (was_enabled_) {
+            glEnable(cap_);
+        } else {
+            glDisable(cap_);
+        }
+    }
+    GLStateGuard(const GLStateGuard&) = delete;
+    GLStateGuard& operator=(const GLStateGuard&) = delete;
+private:
+    GLenum cap_;
+    GLboolean was_enabled_;
+};
+
+// RAII helper for depth mask
+class GLDepthMaskGuard {
+public:
+    explicit GLDepthMaskGuard(GLboolean new_value) {
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &old_value_);
+        glDepthMask(new_value);
+    }
+    ~GLDepthMaskGuard() {
+        glDepthMask(old_value_);
+    }
+    GLDepthMaskGuard(const GLDepthMaskGuard&) = delete;
+    GLDepthMaskGuard& operator=(const GLDepthMaskGuard&) = delete;
+private:
+    GLboolean old_value_;
+};
+
 MeshRenderer::MeshRenderer() = default;
 
 MeshRenderer::~MeshRenderer() {
@@ -436,9 +476,9 @@ void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projectio
 }
 
 void MeshRenderer::render_grid(const glm::mat4& view, const glm::mat4& projection) {
-    // Render grid behind everything - disable depth write
-    glDepthMask(GL_FALSE);
-    glEnable(GL_BLEND);
+    // Use RAII guards to ensure GL state is restored even on exception
+    GLDepthMaskGuard depth_guard(GL_FALSE);
+    GLStateGuard blend_guard(GL_BLEND, true);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     
     grid_shader_->use();
@@ -450,9 +490,7 @@ void MeshRenderer::render_grid(const glm::mat4& view, const glm::mat4& projectio
     glBindVertexArray(grid_vao_);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
-    
-    glDisable(GL_BLEND);
-    glDepthMask(GL_TRUE);
+    // GL state automatically restored by RAII guards
 }
 
 void MeshRenderer::render_normals(const glm::mat4& view, const glm::mat4& projection) {

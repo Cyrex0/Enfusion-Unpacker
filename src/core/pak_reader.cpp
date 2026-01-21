@@ -53,6 +53,9 @@ uint32_t PakReader::read_uint32_le(std::istream& stream) {
 bool PakReader::open(const std::filesystem::path& path) {
     LOG_DEBUG("PakReader", "Opening: " << path.string());
     
+    // Close any previously open file
+    close();
+    
     file_.open(path, std::ios::binary);
     if (!file_) {
         LOG_ERROR("PakReader", "Failed to open file: " << path.string());
@@ -61,17 +64,28 @@ bool PakReader::open(const std::filesystem::path& path) {
     
     pak_path_ = path;
     
-    // Parse FORM header
-    if (!parse_form_header()) {
-        LOG_ERROR("PakReader", "Failed to parse FORM header in: " << path.filename().string());
-        file_.close();
+    // Use try-catch to ensure file is closed on any exception
+    try {
+        // Parse FORM header
+        if (!parse_form_header()) {
+            LOG_ERROR("PakReader", "Failed to parse FORM header in: " << path.filename().string());
+            close();
+            return false;
+        }
+        
+        // Parse all chunks
+        if (!parse_chunks()) {
+            LOG_ERROR("PakReader", "Failed to parse chunks in: " << path.filename().string());
+            close();
+            return false;
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("PakReader", "Exception while parsing: " << e.what());
+        close();
         return false;
-    }
-    
-    // Parse all chunks
-    if (!parse_chunks()) {
-        LOG_ERROR("PakReader", "Failed to parse chunks in: " << path.filename().string());
-        file_.close();
+    } catch (...) {
+        LOG_ERROR("PakReader", "Unknown exception while parsing PAK file");
+        close();
         return false;
     }
     

@@ -6,6 +6,7 @@
 #include <fstream>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 
 namespace enfusion {
 
@@ -84,12 +85,16 @@ std::filesystem::path ensure_unique_path(const std::filesystem::path& path) {
     auto ext = path.extension().string();
     auto parent = path.parent_path();
     
-    int counter = 1;
-    while (true) {
+    // Limit iterations to prevent infinite loop (e.g., filesystem issues)
+    constexpr int MAX_ATTEMPTS = 10000;
+    for (int counter = 1; counter <= MAX_ATTEMPTS; ++counter) {
         auto new_path = parent / (stem + "_" + std::to_string(counter) + ext);
         if (!std::filesystem::exists(new_path)) return new_path;
-        counter++;
     }
+    
+    // If we exhausted attempts, return path with timestamp
+    auto now = std::chrono::system_clock::now().time_since_epoch().count();
+    return parent / (stem + "_" + std::to_string(now) + ext);
 }
 
 std::string format_file_size(size_t bytes) {

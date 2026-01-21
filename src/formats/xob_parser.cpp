@@ -155,7 +155,7 @@ static std::vector<uint8_t> decompress_lz4_chained(const uint8_t* data, size_t s
     std::vector<uint8_t> result;
     result.reserve(size * 4);
 
-    std::cerr << "[XOB] Decompressing LZ4 chained, input size=" << size << "\n";
+    LOG_DEBUG("XobParser", "Decompressing LZ4 chained, input size=" << size);
 
     size_t pos = 0;
     std::vector<uint8_t> prev_dict;
@@ -199,7 +199,7 @@ static std::vector<uint8_t> decompress_lz4_chained(const uint8_t* data, size_t s
 
         pos += block_size;
         if (dec_size <= 0) {
-            std::cerr << "[XOB] Block " << block_count << " decompression failed, dec_size=" << dec_size << "\n";
+            LOG_DEBUG("XobParser", "Block " << block_count << " decompression failed, dec_size=" << dec_size);
             break;
         }
 
@@ -218,7 +218,7 @@ static std::vector<uint8_t> decompress_lz4_chained(const uint8_t* data, size_t s
         // Do NOT break on has_more=false - continue until end of data
     }
 
-    std::cerr << "[XOB] Decompressed " << block_count << " blocks, total output=" << result.size() << "\n";
+    LOG_DEBUG("XobParser", "Decompressed " << block_count << " blocks, total output=" << result.size());
     return result;
 }
 
@@ -331,40 +331,47 @@ static std::vector<uint8_t> extract_lod_region_internal(
     
     const auto& desc = descriptors[lod_index];
     
-    // Calculate expected size based on vertex attributes
-    size_t idx_size = desc.triangle_count * 3 * 2;  // bytes per index array
-    size_t expected_size = idx_size * 2;  // Two index arrays
-    expected_size += desc.vertex_count * desc.position_stride;  // Positions
+    // Calculate expected size based on vertex attributes with overflow protection
+    // Use uint64_t for intermediate calculations to prevent overflow
+    constexpr size_t MAX_SAFE_SIZE = 1024 * 1024 * 256;  // 256MB max reasonable mesh size
+    
+    uint64_t idx_size = static_cast<uint64_t>(desc.triangle_count) * 3 * XOB_INDEX_SIZE;  // bytes per index array
+    uint64_t expected_size = idx_size * XOB_INDEX_ARRAYS;  // Two index arrays
+    expected_size += static_cast<uint64_t>(desc.vertex_count) * desc.position_stride;  // Positions
     
     // Add optional attributes based on flags
-    if (desc.has_normals) expected_size += desc.vertex_count * 4;
+    if (desc.has_normals) expected_size += static_cast<uint64_t>(desc.vertex_count) * XOB_NORMAL_SIZE;
     
     // UV stride: 4 bytes if has_uvs (0x04) is set (compact), 8 bytes otherwise
-    size_t uv_stride = desc.has_uvs ? 4 : 8;
-    expected_size += desc.vertex_count * uv_stride;  // UVs
+    size_t uv_stride = desc.has_uvs ? XOB_UV_SIZE : 8;
+    expected_size += static_cast<uint64_t>(desc.vertex_count) * uv_stride;  // UVs
+    
+    // Check for overflow before continuing
+    if (expected_size > MAX_SAFE_SIZE) {
+        LOG_ERROR("XobParser", "Calculated mesh size exceeds maximum (" << expected_size << " > " << MAX_SAFE_SIZE << ")");
+        return {};
+    }
     
     // CORRECTED: When tangents AND skinning are both present, they form a combined
     // 20-byte structure containing: [bone_idx(4) + tangent_frame(8) + tangent(4) + normal(4)]
     // We only need to account for tangents here (4 bytes) since normals are already counted
-    if (desc.has_tangents) expected_size += desc.vertex_count * 4;
-    if (desc.has_skinning) expected_size += desc.vertex_count * 8;
-    if (desc.has_extra_normals) expected_size += desc.vertex_count * 8;
+    if (desc.has_tangents) expected_size += static_cast<uint64_t>(desc.vertex_count) * XOB_TANGENT_SIZE;
+    if (desc.has_skinning) expected_size += static_cast<uint64_t>(desc.vertex_count) * 8;
+    if (desc.has_extra_normals) expected_size += static_cast<uint64_t>(desc.vertex_count) * XOB_EXTRA_SIZE;
     
-    std::cerr << "[XOB] LOD " << lod_index << " extraction:\n"
-              << "  decomp_size from descriptor: " << desc.decomp_size << "\n"
-              << "  expected_size (calculated):  " << expected_size << "\n"
-              << "  total decompressed buffer:   " << decompressed.size() << "\n";
+    LOG_DEBUG("XobParser", "LOD " << lod_index << " extraction: decomp_size=" << desc.decomp_size 
+              << " expected_size=" << expected_size << " buffer_size=" << decompressed.size());
     
     // CORRECTED: LOD0 data starts at offset 0, not at the end of the buffer
     // The decomp_size field often contains total decompressed size, not per-LOD size
     // For single-LOD meshes (most common), extract from beginning of buffer
     
-    // Use calculated expected_size as the region size
-    size_t region_size = expected_size;
+    // Use calculated expected_size as the region size (safe cast after overflow check)
+    size_t region_size = static_cast<size_t>(expected_size);
     
     // If decompressed buffer is smaller than expected, use what we have
     if (region_size > decompressed.size()) {
-        std::cerr << "[XOB] WARNING: expected_size > decompressed.size(), clamping\n";
+        LOG_WARNING("XobParser", "expected_size > decompressed.size(), clamping");
         region_size = decompressed.size();
     }
     
@@ -376,15 +383,15 @@ static std::vector<uint8_t> extract_lod_region_internal(
     // If there are multiple LODs and we're not requesting LOD0,
     // we'd need to skip previous LOD data (future enhancement)
     if (descriptors.size() > 1 && lod_index > 0) {
-        std::cerr << "[XOB] WARNING: Multi-LOD extraction not fully implemented\n";
+        LOG_WARNING("XobParser", "Multi-LOD extraction not fully implemented");
         // For now, just try to extract from start
     }
     
-    std::cerr << "[XOB] Using region: start=" << start_pos << " end=" << end_pos 
-              << " size=" << (end_pos - start_pos) << "\n";
+    LOG_DEBUG("XobParser", "Using region: start=" << start_pos << " end=" << end_pos 
+              << " size=" << (end_pos - start_pos));
     
     if (start_pos >= end_pos || end_pos > decompressed.size()) {
-        std::cerr << "[XOB] ERROR: Invalid region bounds\n";
+        LOG_ERROR("XobParser", "Invalid region bounds");
         return {};
     }
     
@@ -465,9 +472,10 @@ static bool parse_mesh_from_region(
     // Always use Array 1 for rendering
     
     // Extract indices from Array 1
+    // Note: i * 2 + 2 <= idx_array_size ensures we can read 2 bytes at offset i * 2
     mesh.indices.clear();
     mesh.indices.reserve(index_count);
-    for (uint32_t i = 0; i < index_count && i * 2 + 1 < idx_array_size; i++) {
+    for (uint32_t i = 0; i < index_count && (i * 2 + 2) <= idx_array_size; i++) {
         uint16_t idx = read_u16_le(region.data() + i * 2);  // Always use Array 1
         mesh.indices.push_back(static_cast<uint32_t>(idx));
     }

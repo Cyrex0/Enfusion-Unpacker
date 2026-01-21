@@ -31,7 +31,7 @@ static std::ofstream g_log_file;
 // Custom stream buffer that writes to file
 class LogStreamBuf : public std::streambuf {
 public:
-    LogStreamBuf(std::ofstream& file) : file_(file) {}
+    explicit LogStreamBuf(std::ofstream& file) : file_(file) {}
 protected:
     int overflow(int c) override {
         if (c != EOF) {
@@ -50,27 +50,36 @@ private:
 };
 
 static LogStreamBuf* g_log_buf = nullptr;
+static std::streambuf* g_original_cerr_buf = nullptr;  // Store original cerr buffer
 
 void init_logging() {
     // Logger auto-initializes with Debug level to enfusion_unpacker.log
     // Just trigger the singleton to ensure it's created
     auto& logger = enfusion::Logger::instance();
-    (void)logger;  // Suppress unused warning
+    static_cast<void>(logger);  // Suppress unused warning (proper C++ cast)
     
     // Also redirect std::cerr to the log file for any legacy output
     g_log_file.open("enfusion_unpacker.log", std::ios::out | std::ios::app);
     if (g_log_file.is_open()) {
         g_log_buf = new LogStreamBuf(g_log_file);
-        std::cerr.rdbuf(g_log_buf);
+        g_original_cerr_buf = std::cerr.rdbuf(g_log_buf);  // Save original buffer
     }
 }
 
 void shutdown_logging() {
+    // Restore original cerr buffer BEFORE deleting our custom buffer
+    if (g_original_cerr_buf != nullptr) {
+        std::cerr.rdbuf(g_original_cerr_buf);
+        g_original_cerr_buf = nullptr;
+    }
+    
+    // Now safe to delete our buffer and close file
+    delete g_log_buf;
+    g_log_buf = nullptr;
+    
     if (g_log_file.is_open()) {
         g_log_file.close();
     }
-    delete g_log_buf;
-    g_log_buf = nullptr;
 }
 
 // CLI argument parsing
