@@ -131,6 +131,9 @@ private:
     // Per-material textures (material_index -> texture_id)
     std::map<size_t, uint32_t> material_diffuse_textures_;
     
+    // Per-material base colors (from emat Color_3 parameter)
+    std::map<size_t, glm::vec3> material_base_colors_;
+    
     // Texture cache: path (lowercase) -> cached texture info
     // Prevents loading same texture multiple times for different materials
     std::unordered_map<std::string, CachedTexture> texture_cache_;

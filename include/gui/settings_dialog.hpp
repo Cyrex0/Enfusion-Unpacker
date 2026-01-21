@@ -25,6 +25,7 @@ private:
     void render_appearance_tab(AppSettings& settings);
     void render_export_tab(AppSettings& settings);
     void render_paths_tab(AppSettings& settings);
+    void render_logging_tab(AppSettings& settings);
     
     void apply_settings();
     void browse_folder(std::filesystem::path& path);

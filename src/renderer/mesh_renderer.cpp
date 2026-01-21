@@ -4,8 +4,10 @@
 
 #include "renderer/mesh_renderer.hpp"
 #include "renderer/shader.hpp"
+#include "enfusion/logging.hpp"
 #include <glad/glad.h>
 #include <iostream>
+#include <sstream>
 
 namespace enfusion {
 
@@ -52,8 +54,8 @@ void MeshRenderer::set_mesh(std::shared_ptr<const XobMesh> mesh) {
 void MeshRenderer::upload_mesh() {
     if (!mesh_) return;
     
-    std::cerr << "[Renderer] Uploading mesh: verts=" << mesh_->vertices.size() 
-              << " indices=" << mesh_->indices.size() << "\n";
+    LOG_DEBUG("Renderer", "Uploading mesh: verts=" << mesh_->vertices.size() 
+              << " indices=" << mesh_->indices.size());
     
     // Compute bounding box
     bounds_min_ = glm::vec3(FLT_MAX);
@@ -66,10 +68,10 @@ void MeshRenderer::upload_mesh() {
     // Debug: Print first few vertices with UVs
     for (size_t i = 0; i < std::min(size_t(5), mesh_->vertices.size()); i++) {
         const auto& v = mesh_->vertices[i];
-        std::cerr << "[Renderer]   Vert " << i << ": pos=(" << v.position.x << ", " 
+        LOG_DEBUG("Renderer", "  Vert " << i << ": pos=(" << v.position.x << ", " 
                   << v.position.y << ", " << v.position.z << ") "
                   << "uv=(" << v.uv.x << ", " << v.uv.y << ") "
-                  << "normal=(" << v.normal.x << ", " << v.normal.y << ", " << v.normal.z << ")\n";
+                  << "normal=(" << v.normal.x << ", " << v.normal.y << ", " << v.normal.z << ")");
     }
     
     // Clean up old buffers
@@ -100,7 +102,15 @@ void MeshRenderer::upload_mesh() {
                  mesh_->indices.data(),
                  GL_STATIC_DRAW);
     
-    std::cerr << "[Renderer] VAO=" << vao_ << " VBO=" << vbo_ << " EBO=" << ebo_ << "\n";
+    // Debug: log first 20 indices
+    std::ostringstream idx_debug;
+    idx_debug << "First 20 indices uploaded to GPU: ";
+    for (size_t i = 0; i < std::min(size_t(20), mesh_->indices.size()); i++) {
+        idx_debug << mesh_->indices[i] << " ";
+    }
+    LOG_DEBUG("Renderer", idx_debug.str());
+    
+    LOG_DEBUG("Renderer", "VAO=" << vao_ << " VBO=" << vbo_ << " EBO=" << ebo_);
     
     // Set vertex attributes
     // Position
@@ -165,8 +175,14 @@ void MeshRenderer::render(const glm::mat4& view, const glm::mat4& projection) {
     }
 }
 
-void MeshRenderer::set_material_texture(size_t material_index, uint32_t texture_id) {
+void MeshRenderer::set_material_texture(size_t material_index, uint32_t texture_id, bool is_mcr) {
     material_textures_[material_index].diffuse = texture_id;
+    material_textures_[material_index].is_mcr = is_mcr;
+}
+
+void MeshRenderer::set_material_color(size_t material_index, const glm::vec3& color) {
+    material_textures_[material_index].base_color = color;
+    material_textures_[material_index].has_base_color = true;
 }
 
 void MeshRenderer::set_material_enabled(size_t material_index, bool enabled) {
@@ -199,8 +215,24 @@ void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projectio
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
     }
     
-    // Render per-material if we have material ranges
+    // Determine if we should use per-material rendering
+    bool use_material_ranges = false;
     if (mesh_ && !mesh_->material_ranges.empty()) {
+        // Calculate total triangles covered by ranges
+        uint32_t covered_triangles = 0;
+        for (const auto& range : mesh_->material_ranges) {
+            covered_triangles += range.triangle_count;
+        }
+        uint32_t total_triangles = static_cast<uint32_t>(index_count_ / 3);
+        // Use per-material rendering if ranges cover at least 50% of triangles
+        use_material_ranges = (covered_triangles >= total_triangles / 2);
+    }
+    
+    if (use_material_ranges) {
+        // Track which triangles have been rendered
+        uint32_t last_rendered_end = 0;
+        uint32_t total_triangles = static_cast<uint32_t>(index_count_ / 3);
+        
         // Render each material range separately
         for (const auto& range : mesh_->material_ranges) {
             // Check if material is enabled
@@ -214,24 +246,41 @@ void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projectio
                 // Dim non-highlighted materials
                 mesh_shader_->set_vec3("objectColor", glm::vec3(0.4f, 0.4f, 0.45f));
             } else {
-                mesh_shader_->set_vec3("objectColor", glm::vec3(0.8f, 0.8f, 0.85f));
+                mesh_shader_->set_vec3("objectColor", glm::vec3(1.0f, 1.0f, 1.0f));
             }
             
             // Bind per-material texture if available
             uint32_t tex = 0;
-            if (it != material_textures_.end() && it->second.diffuse != 0) {
-                tex = it->second.diffuse;
-            } else {
-                tex = fallback_texture_;  // Use fallback
+            bool is_mcr = false;
+            bool has_base_color = false;
+            glm::vec3 base_color(0.5f);
+            
+            if (it != material_textures_.end()) {
+                if (it->second.diffuse != 0) {
+                    tex = it->second.diffuse;
+                    is_mcr = it->second.is_mcr;
+                }
+                if (it->second.has_base_color) {
+                    has_base_color = true;
+                    base_color = it->second.base_color;
+                }
+            } else if (fallback_texture_ != 0) {
+                tex = fallback_texture_;
             }
+            
+            // Set base color uniform
+            mesh_shader_->set_bool("hasBaseColor", has_base_color);
+            mesh_shader_->set_vec3("baseColor", base_color);
             
             if (tex != 0) {
                 mesh_shader_->set_bool("useTexture", true);
+                mesh_shader_->set_bool("isMCRTexture", is_mcr);
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, tex);
                 mesh_shader_->set_int("diffuseMap", 0);
             } else {
                 mesh_shader_->set_bool("useTexture", false);
+                mesh_shader_->set_bool("isMCRTexture", false);
             }
             
             // Draw this material's triangles
@@ -239,25 +288,97 @@ void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projectio
                           static_cast<GLsizei>(range.index_count()),
                           GL_UNSIGNED_INT,
                           reinterpret_cast<void*>(range.index_start() * sizeof(uint32_t)));
+            
+            if (range.triangle_end > last_rendered_end) {
+                last_rendered_end = range.triangle_end;
+            }
+        }
+        
+        // Render any remaining triangles not covered by ranges with default material
+        if (last_rendered_end < total_triangles) {
+            mesh_shader_->set_vec3("objectColor", glm::vec3(1.0f, 1.0f, 1.0f));
+            
+            // Try to use the first available texture
+            uint32_t tex = fallback_texture_;
+            bool is_mcr = false;
+            bool has_base_color = false;
+            glm::vec3 base_color(0.5f);
+            
+            if (!material_textures_.empty()) {
+                auto& first = material_textures_.begin()->second;
+                if (first.diffuse != 0) {
+                    tex = first.diffuse;
+                    is_mcr = first.is_mcr;
+                }
+                if (first.has_base_color) {
+                    has_base_color = true;
+                    base_color = first.base_color;
+                }
+            }
+            
+            mesh_shader_->set_bool("hasBaseColor", has_base_color);
+            mesh_shader_->set_vec3("baseColor", base_color);
+            
+            if (tex != 0) {
+                mesh_shader_->set_bool("useTexture", true);
+                mesh_shader_->set_bool("isMCRTexture", is_mcr);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, tex);
+                mesh_shader_->set_int("diffuseMap", 0);
+            } else {
+                mesh_shader_->set_bool("useTexture", false);
+                mesh_shader_->set_bool("isMCRTexture", false);
+            }
+            
+            uint32_t remaining_start = last_rendered_end * 3;
+            uint32_t remaining_count = (total_triangles - last_rendered_end) * 3;
+            
+            glDrawElements(GL_TRIANGLES,
+                          static_cast<GLsizei>(remaining_count),
+                          GL_UNSIGNED_INT,
+                          reinterpret_cast<void*>(remaining_start * sizeof(uint32_t)));
         }
     } else {
-        // Fallback: render entire mesh with single texture
-        mesh_shader_->set_vec3("objectColor", glm::vec3(0.8f, 0.8f, 0.85f));
+        // Fallback: render entire mesh with best available texture
+        mesh_shader_->set_vec3("objectColor", glm::vec3(1.0f, 1.0f, 1.0f));
         
-        if (fallback_texture_ != 0) {
+        // Try to use the first available material texture
+        uint32_t tex = fallback_texture_;
+        bool is_mcr = false;
+        bool has_base_color = false;
+        glm::vec3 base_color(0.5f);
+        
+        if (!material_textures_.empty()) {
+            auto& first = material_textures_.begin()->second;
+            if (first.diffuse != 0) {
+                tex = first.diffuse;
+                is_mcr = first.is_mcr;
+            }
+            if (first.has_base_color) {
+                has_base_color = true;
+                base_color = first.base_color;
+            }
+        }
+        
+        mesh_shader_->set_bool("hasBaseColor", has_base_color);
+        mesh_shader_->set_vec3("baseColor", base_color);
+        
+        if (tex != 0) {
             mesh_shader_->set_bool("useTexture", true);
+            mesh_shader_->set_bool("isMCRTexture", is_mcr);
             glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, fallback_texture_);
+            glBindTexture(GL_TEXTURE_2D, tex);
             mesh_shader_->set_int("diffuseMap", 0);
         } else {
             mesh_shader_->set_bool("useTexture", false);
+            mesh_shader_->set_bool("isMCRTexture", false);
         }
         
         // Determine index range based on LOD
         size_t index_offset = 0;
         size_t index_count = index_count_;
         
-        if (!mesh_->lods.empty() && current_lod_ < static_cast<int>(mesh_->lods.size())) {
+        if (mesh_ && !mesh_->lods.empty() && current_lod_ < static_cast<int>(mesh_->lods.size())) {
             index_offset = mesh_->lods[current_lod_].index_offset;
             index_count = mesh_->lods[current_lod_].index_count;
         }

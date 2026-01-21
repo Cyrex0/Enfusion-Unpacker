@@ -41,7 +41,12 @@ void ExportDialog::render_content() {
     // Source info
     ImGui::Text("Source:");
     ImGui::SameLine();
-    ImGui::TextDisabled("%s", source_path_.string().c_str());
+    if (!selected_file_.empty() && !batch_mode_) {
+        // Single file export
+        ImGui::TextDisabled("%s", selected_file_.c_str());
+    } else {
+        ImGui::TextDisabled("%s", source_path_.string().c_str());
+    }
 
     ImGui::Spacing();
     ImGui::Separator();

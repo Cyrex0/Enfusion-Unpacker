@@ -13,6 +13,23 @@
 
 namespace enfusion {
 
+/**
+ * Extended texture data that can hold either decompressed RGBA or compressed data.
+ */
+struct DdsTextureData {
+    std::vector<uint8_t> pixels;  // Pixel data (RGBA or compressed)
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t channels = 4;
+    uint32_t mip_count = 1;
+    std::string format;
+    
+    // Compression info for GPU upload
+    bool is_compressed = false;
+    uint32_t gl_internal_format = 0;  // e.g., GL_COMPRESSED_RGBA_BPTC_UNORM
+    uint32_t compressed_size = 0;
+};
+
 class DdsLoader {
 public:
     /**
@@ -22,6 +39,12 @@ public:
      * @return TextureData with decoded pixels, or nullopt on failure
      */
     static std::optional<TextureData> load(std::span<const uint8_t> data);
+    
+    /**
+     * Load DDS with option to keep compressed for GPU upload.
+     * This is more efficient for BC7 textures.
+     */
+    static std::optional<DdsTextureData> load_for_gpu(std::span<const uint8_t> data);
     
     /**
      * Get format description string.
@@ -38,3 +61,4 @@ private:
 };
 
 } // namespace enfusion
+

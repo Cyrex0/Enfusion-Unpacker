@@ -72,6 +72,13 @@ public:
     }
     
     /**
+     * Check if a log level is enabled (for macro optimization)
+     */
+    bool is_enabled(LogLevel level) const {
+        return level >= min_level_;
+    }
+    
+    /**
      * Enable/disable console output
      */
     void set_console_output(bool enabled) {
@@ -164,9 +171,31 @@ public:
     }
 
 private:
-    Logger() = default;
+    Logger() {
+        // Auto-initialize: Debug level, file only, no console spam
+        min_level_ = LogLevel::Debug;
+        console_enabled_ = false;
+        
+        // Auto-open log file
+        file_.open("enfusion_unpacker.log", std::ios::out | std::ios::trunc);
+        if (file_.is_open()) {
+            // Write header
+            auto now = std::chrono::system_clock::now();
+            auto time = std::chrono::system_clock::to_time_t(now);
+            std::tm tm_buf;
+#ifdef _WIN32
+            localtime_s(&tm_buf, &time);
+#else
+            localtime_r(&time, &tm_buf);
+#endif
+            file_ << "=== Enfusion Unpacker Log - " 
+                  << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << " ===\n\n";
+            file_.flush();
+        }
+    }
     ~Logger() {
         if (file_.is_open()) {
+            file_ << "\n=== Log End ===\n";
             file_.close();
         }
     }
@@ -208,23 +237,49 @@ private:
     }
     
     std::mutex mutex_;
-    LogLevel min_level_ = LogLevel::Info;  // Default to Info level
-    bool console_enabled_ = true;
+    LogLevel min_level_ = LogLevel::Debug;  // Default to Debug - all logs to file
+    bool console_enabled_ = false;          // No console spam by default
     std::ofstream file_;
     std::function<void(LogLevel, const std::string&)> callback_;
 };
 
-// Convenience macros for logging with automatic tag from function name
-#define LOG_DEBUG(tag, ...) \
-    enfusion::Logger::instance().debug(tag, __VA_ARGS__)
+// Stream-based logging macros - usage: LOG_INFO("Tag", "message " << value << " more")
+#define LOG_DEBUG(tag, msg) \
+    do { \
+        if (enfusion::Logger::instance().is_enabled(enfusion::LogLevel::Debug)) { \
+            std::ostringstream _log_ss; \
+            _log_ss << msg; \
+            enfusion::Logger::instance().debug(tag, _log_ss.str()); \
+        } \
+    } while(0)
 
-#define LOG_INFO(tag, ...) \
-    enfusion::Logger::instance().info(tag, __VA_ARGS__)
+#define LOG_INFO(tag, msg) \
+    do { \
+        if (enfusion::Logger::instance().is_enabled(enfusion::LogLevel::Info)) { \
+            std::ostringstream _log_ss; \
+            _log_ss << msg; \
+            enfusion::Logger::instance().info(tag, _log_ss.str()); \
+        } \
+    } while(0)
 
-#define LOG_WARN(tag, ...) \
-    enfusion::Logger::instance().warn(tag, __VA_ARGS__)
+#define LOG_WARNING(tag, msg) \
+    do { \
+        if (enfusion::Logger::instance().is_enabled(enfusion::LogLevel::Warning)) { \
+            std::ostringstream _log_ss; \
+            _log_ss << msg; \
+            enfusion::Logger::instance().warn(tag, _log_ss.str()); \
+        } \
+    } while(0)
 
-#define LOG_ERROR(tag, ...) \
-    enfusion::Logger::instance().error(tag, __VA_ARGS__)
+#define LOG_WARN(tag, msg) LOG_WARNING(tag, msg)
+
+#define LOG_ERROR(tag, msg) \
+    do { \
+        if (enfusion::Logger::instance().is_enabled(enfusion::LogLevel::Error)) { \
+            std::ostringstream _log_ss; \
+            _log_ss << msg; \
+            enfusion::Logger::instance().error(tag, _log_ss.str()); \
+        } \
+    } while(0)
 
 } // namespace enfusion

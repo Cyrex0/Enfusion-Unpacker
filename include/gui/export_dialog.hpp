@@ -29,6 +29,11 @@ public:
     void set_source(const std::filesystem::path& path, bool batch = false) {
         source_path_ = path;
         batch_mode_ = batch;
+        selected_file_.clear();  // Clear selected file when source changes
+    }
+    
+    void set_selected_file(const std::string& file) {
+        selected_file_ = file;
     }
 
     void set_batch_mode(bool batch) { batch_mode_ = batch; }
@@ -41,6 +46,7 @@ private:
 
     // Source
     std::filesystem::path source_path_;
+    std::string selected_file_;  // For single file export
     bool batch_mode_ = false;
 
     // Export options

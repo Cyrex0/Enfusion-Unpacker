@@ -35,3 +35,5 @@
 /test_extract
 *.bak
 *.py
+xob_analysis.txt
+XOB_FORMAT_SPEC.md

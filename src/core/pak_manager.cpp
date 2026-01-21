@@ -3,6 +3,7 @@
  */
 
 #include "enfusion/pak_manager.hpp"
+#include "enfusion/logging.hpp"
 #include <algorithm>
 #include <iostream>
 #include <fstream>
@@ -24,6 +25,7 @@ bool PakManager::load_pak(const std::filesystem::path& pak_path) {
     
     // Check if already loaded
     if (pak_index_.find(path_str) != pak_index_.end()) {
+        LOG_DEBUG("PakManager", "Already loaded: " << pak_path.filename().string());
         return true;  // Already loaded
     }
     
@@ -32,7 +34,8 @@ bool PakManager::load_pak(const std::filesystem::path& pak_path) {
     pak->extractor = std::make_unique<AddonExtractor>();
     
     if (!pak->extractor->load(pak_path)) {
-        std::cerr << "[PakManager] Failed to load: " << path_str << "\n";
+        LOG_ERROR("PakManager", "Failed to load PAK: " << path_str 
+                  << " - " << pak->extractor->last_error());
         if (load_callback_) {
             load_callback_(pak_path.filename().string(), false);
         }
@@ -49,8 +52,8 @@ bool PakManager::load_pak(const std::filesystem::path& pak_path) {
     pak_index_[path_str] = index;
     paks_.push_back(std::move(pak));
     
-    std::cerr << "[PakManager] Loaded: " << pak_path.filename().string() 
-              << " (" << paks_.back()->file_list.size() << " files)\n";
+    LOG_INFO("PakManager", "Loaded: " << pak_path.filename().string() 
+             << " (" << paks_.back()->file_list.size() << " files)");
     
     if (load_callback_) {
         load_callback_(pak_path.filename().string(), true);
@@ -109,6 +112,8 @@ std::vector<uint8_t> PakManager::read_file(const std::string& virtual_path) {
     std::string normalized = virtual_path;
     std::replace(normalized.begin(), normalized.end(), '\\', '/');
     
+    LOG_DEBUG("PakManager", "Reading file: " << normalized);
+    
     // Search all loaded PAKs
     for (const auto& pak : paks_) {
         // Check if file exists in this PAK
@@ -125,11 +130,17 @@ std::vector<uint8_t> PakManager::read_file(const std::string& virtual_path) {
         if (found) {
             auto data = pak->extractor->read_file(virtual_path);
             if (!data.empty()) {
+                LOG_DEBUG("PakManager", "Found in: " << pak->path.filename().string() 
+                          << " (" << data.size() << " bytes)");
                 return data;
+            } else {
+                LOG_WARNING("PakManager", "File listed but read failed: " << virtual_path 
+                            << " in " << pak->path.filename().string());
             }
         }
     }
     
+    LOG_DEBUG("PakManager", "File not found in loaded PAKs: " << normalized);
     return {};
 }
 
@@ -534,12 +545,12 @@ bool PakManager::try_load_pak_for_file(const std::string& virtual_path) {
         std::filesystem::path pak_path = index.find_pak_for_file(virtual_path);
         
         if (!pak_path.empty()) {
-            std::cerr << "[PakManager] Index found PAK for " << virtual_path 
-                      << ": " << pak_path.filename().string() << "\n";
+            LOG_DEBUG("PakManager", "Index found PAK for " << virtual_path 
+                      << ": " << pak_path.filename().string());
             
             // We know exactly which PAK has this file
             if (!is_loaded(pak_path)) {
-                std::cerr << "[PakManager] Loading PAK: " << pak_path.string() << "\n";
+                LOG_INFO("PakManager", "Loading PAK: " << pak_path.string());
                 if (load_pak(pak_path)) {
                     lazy_load_count_++;
                     return file_exists(virtual_path);
@@ -547,11 +558,10 @@ bool PakManager::try_load_pak_for_file(const std::string& virtual_path) {
             }
             return file_exists(virtual_path);
         }
-        // File not in index
-        std::cerr << "[PakManager] File not in index: " << virtual_path << "\n";
+        // File not in index - don't log, this is expected for many search attempts
         return false;
     } else {
-        std::cerr << "[PakManager] Index not ready, cannot find: " << virtual_path << "\n";
+        LOG_DEBUG("PakManager", "Index not ready, cannot find: " << virtual_path);
     }
     
     // No index ready - limit lazy loading

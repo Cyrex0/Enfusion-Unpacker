@@ -11,6 +11,7 @@
 #include "enfusion/pak_reader.hpp"
 #include "enfusion/compression.hpp"
 #include "enfusion/files.hpp"
+#include "enfusion/logging.hpp"
 
 #include <fstream>
 #include <cstring>
@@ -50,11 +51,11 @@ uint32_t PakReader::read_uint32_le(std::istream& stream) {
 }
 
 bool PakReader::open(const std::filesystem::path& path) {
-    std::cerr << "[PakReader] Opening: " << path.string() << "\n";
+    LOG_DEBUG("PakReader", "Opening: " << path.string());
     
     file_.open(path, std::ios::binary);
     if (!file_) {
-        std::cerr << "[PakReader] Failed to open file: " << path.string() << "\n";
+        LOG_ERROR("PakReader", "Failed to open file: " << path.string());
         return false;
     }
     
@@ -62,20 +63,20 @@ bool PakReader::open(const std::filesystem::path& path) {
     
     // Parse FORM header
     if (!parse_form_header()) {
-        std::cerr << "[PakReader] Failed to parse FORM header\n";
+        LOG_ERROR("PakReader", "Failed to parse FORM header in: " << path.filename().string());
         file_.close();
         return false;
     }
     
     // Parse all chunks
     if (!parse_chunks()) {
-        std::cerr << "[PakReader] Failed to parse chunks\n";
+        LOG_ERROR("PakReader", "Failed to parse chunks in: " << path.filename().string());
         file_.close();
         return false;
     }
     
-    std::cerr << "[PakReader] Successfully opened: " << path.filename().string() 
-              << " (" << file_count() << " files)\n";
+    LOG_INFO("PakReader", "Opened: " << path.filename().string() 
+              << " (" << file_count() << " files, DATA@" << data_offset_ << ")");
     
     return true;
 }
@@ -85,8 +86,8 @@ bool PakReader::parse_form_header() {
     char sig[4];
     file_.read(sig, 4);
     if (std::memcmp(sig, FORM_SIGNATURE.data(), 4) != 0) {
-        std::cerr << "[PakReader] Invalid FORM signature: " 
-                  << std::string(sig, 4) << " (expected FORM)\n";
+        LOG_ERROR("PakReader", "Invalid FORM signature: '" 
+                  << std::string(sig, 4) << "' (expected 'FORM')");
         return false;
     }
     
@@ -98,8 +99,8 @@ bool PakReader::parse_form_header() {
     char form_type[4];
     file_.read(form_type, 4);
     if (std::memcmp(form_type, PAC1_TYPE.data(), 4) != 0) {
-        std::cerr << "[PakReader] Invalid form type: " 
-                  << std::string(form_type, 4) << " (expected PAC1)\n";
+        LOG_ERROR("PakReader", "Invalid form type: '" 
+                  << std::string(form_type, 4) << "' (expected 'PAC1')");
         return false;
     }
     
@@ -253,6 +254,7 @@ const PakEntry* PakReader::find_entry(const std::string& path) const {
 std::vector<uint8_t> PakReader::read_file(const std::string& path) {
     const PakEntry* entry = find_entry(path);
     if (!entry) {
+        LOG_DEBUG("PakReader", "File not found in PAK: " << path);
         return {};
     }
     return read_file(*entry);
@@ -260,25 +262,49 @@ std::vector<uint8_t> PakReader::read_file(const std::string& path) {
 
 std::vector<uint8_t> PakReader::read_file(const PakEntry& entry) {
     if (!file_.is_open()) {
+        LOG_ERROR("PakReader", "Cannot read file - PAK not open");
         return {};
     }
     
     // Seek to file data (offset is absolute in file)
     file_.seekg(entry.offset);
+    if (!file_.good()) {
+        LOG_ERROR("PakReader", "Failed to seek to offset " << entry.offset 
+                  << " for file: " << entry.path);
+        return {};
+    }
     
     // Read data
     std::vector<uint8_t> data(entry.size);
     file_.read(reinterpret_cast<char*>(data.data()), entry.size);
     
+    if (file_.gcount() != static_cast<std::streamsize>(entry.size)) {
+        LOG_ERROR("PakReader", "Failed to read " << entry.size << " bytes for: " 
+                  << entry.path << " (got " << file_.gcount() << ")");
+        return {};
+    }
+    
     // Decompress if needed
     if (entry.is_compressed()) {
         try {
             if (entry.compression == PakCompression::Zlib) {
-                return decompress_zlib(data.data(), data.size(), entry.original_size);
+                LOG_DEBUG("PakReader", "Decompressing (zlib): " << entry.path 
+                          << " (" << entry.size << " -> " << entry.original_size << ")");
+                auto decompressed = decompress_zlib(data.data(), data.size(), entry.original_size);
+                if (decompressed.empty()) {
+                    LOG_ERROR("PakReader", "Zlib decompression returned empty for: " << entry.path);
+                    return {};
+                }
+                return decompressed;
             }
+            LOG_WARNING("PakReader", "Unknown compression type " 
+                        << static_cast<uint32_t>(entry.compression) << " for: " << entry.path);
             // Add other compression types here if discovered
+        } catch (const std::exception& e) {
+            LOG_ERROR("PakReader", "Decompression failed for: " << entry.path << " - " << e.what());
+            return {};
         } catch (...) {
-            // Decompression failed, return empty
+            LOG_ERROR("PakReader", "Decompression failed (unknown exception) for: " << entry.path);
             return {};
         }
     }

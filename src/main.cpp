@@ -52,17 +52,14 @@ private:
 static LogStreamBuf* g_log_buf = nullptr;
 
 void init_logging() {
-    // Open log file with timestamp
-    g_log_file.open("enfusion_unpacker.log", std::ios::out | std::ios::trunc);
+    // Logger auto-initializes with Debug level to enfusion_unpacker.log
+    // Just trigger the singleton to ensure it's created
+    auto& logger = enfusion::Logger::instance();
+    (void)logger;  // Suppress unused warning
+    
+    // Also redirect std::cerr to the log file for any legacy output
+    g_log_file.open("enfusion_unpacker.log", std::ios::out | std::ios::app);
     if (g_log_file.is_open()) {
-        // Write header
-        std::time_t now = std::time(nullptr);
-        char time_buf[64];
-        std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
-        g_log_file << "=== Enfusion Unpacker Log - " << time_buf << " ===\n\n";
-        g_log_file.flush();
-        
-        // Redirect cerr to log file
         g_log_buf = new LogStreamBuf(g_log_file);
         std::cerr.rdbuf(g_log_buf);
     }
@@ -70,7 +67,6 @@ void init_logging() {
 
 void shutdown_logging() {
     if (g_log_file.is_open()) {
-        g_log_file << "\n=== Log End ===\n";
         g_log_file.close();
     }
     delete g_log_buf;
@@ -87,6 +83,7 @@ struct CliArgs {
     std::string output_dir;
     std::string filter_pattern;
     bool verbose = false;
+    bool debug_logging = false;
 };
 
 void print_help() {
@@ -106,11 +103,13 @@ Options:
   --output, -o <dir>   Output directory for extraction
   --filter, -f <pat>   Only extract files matching pattern (glob-style)
   --verbose, -v        Verbose output
+  --debug, -d          Enable debug logging for troubleshooting
 
 Examples:
   EnfusionUnpacker.exe --list "C:\Games\ArmaReforger\addons\data.pak"
   EnfusionUnpacker.exe --extract "data.pak" --output "C:\Extracted" --filter "*.edds"
   EnfusionUnpacker.exe -e addon.pak -o ./output -f "Textures/*"
+  EnfusionUnpacker.exe --debug -e addon.pak -o ./output   # With debug logs
 
 )" << std::endl;
 }
@@ -151,6 +150,9 @@ CliArgs parse_args(int argc, char* argv[]) {
         }
         else if (arg == "--verbose" || arg == "-v") {
             args.verbose = true;
+        }
+        else if (arg == "--debug" || arg == "-d") {
+            args.debug_logging = true;
         }
     }
     
@@ -321,9 +323,15 @@ int main(int argc, char* argv[]) {
     // Parse command line arguments
     CliArgs args = parse_args(argc, argv);
     
-    // CLI mode doesn't need logging to file
+    // Initialize logging
     if (!args.cli_mode) {
         init_logging();
+    }
+    
+    // Enable debug logging if requested
+    if (args.debug_logging) {
+        enfusion::Logger::instance().set_level(enfusion::LogLevel::Debug);
+        LOG_INFO("App", "Debug logging enabled");
     }
     
     int result;

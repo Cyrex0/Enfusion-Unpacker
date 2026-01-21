@@ -3,6 +3,7 @@
  */
 
 #include "renderer/shader.hpp"
+#include "enfusion/logging.hpp"
 #include <glad/glad.h>
 #include <fstream>
 #include <sstream>
@@ -130,14 +131,14 @@ bool Shader::check_compile_errors(GLuint shader, const std::string& type) {
         glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
         if (!success) {
             glGetShaderInfoLog(shader, 1024, nullptr, info_log);
-            std::cerr << "Shader compilation error (" << type << "): " << info_log << std::endl;
+            LOG_ERROR("Shader", "Shader compilation error (" << type << "): " << info_log);
             return false;
         }
     } else {
         glGetProgramiv(shader, GL_LINK_STATUS, &success);
         if (!success) {
             glGetProgramInfoLog(shader, 1024, nullptr, info_log);
-            std::cerr << "Program linking error: " << info_log << std::endl;
+            LOG_ERROR("Shader", "Program linking error: " << info_log);
             return false;
         }
     }
@@ -190,39 +191,96 @@ in vec2 TexCoord;
 uniform vec3 lightDir;
 uniform vec3 lightColor;
 uniform vec3 objectColor;
+uniform vec3 baseColor;     // Base color from emat (for MCR materials)
 uniform bool useTexture;
+uniform bool isMCRTexture;  // True for _MCR textures (Metallic-Cavity-Roughness)
+uniform bool hasBaseColor;  // True if baseColor was set from emat
 uniform sampler2D diffuseMap;
 
 void main() {
-    // Ambient - high for visibility
-    float ambientStrength = 0.5;
-    vec3 ambient = ambientStrength * lightColor;
-    
-    // Diffuse lighting
     vec3 norm = normalize(Normal);
-    float diff = max(dot(norm, -lightDir), 0.0);
-    vec3 diffuse = diff * lightColor * 0.7;
+    
+    // Main directional light
+    float NdotL = max(dot(norm, -lightDir), 0.0);
+    
+    // Fill light from opposite side (soft)
+    float fillNdotL = max(dot(norm, lightDir), 0.0) * 0.3;
+    
+    // Sky/ambient from above
+    float skyNdotL = dot(norm, vec3(0.0, 1.0, 0.0)) * 0.5 + 0.5;
+    
+    // Ground bounce (subtle)
+    float groundNdotL = max(dot(norm, vec3(0.0, -1.0, 0.0)), 0.0) * 0.1;
+    
+    // Combine lighting
+    float totalLight = 0.35 +           // Ambient base
+                       NdotL * 0.55 +    // Main light
+                       fillNdotL +       // Fill light
+                       skyNdotL * 0.15 + // Sky light
+                       groundNdotL;      // Ground bounce
     
     vec3 color = objectColor;
     if (useTexture) {
         vec4 texColor = texture(diffuseMap, TexCoord);
-        // For MCR textures: R=Metallic, G=Color(albedo), B=Roughness
-        // The G channel contains the grayscale albedo
-        // Use G channel as the base color, significantly boosted
-        float albedo = texColor.g;
         
-        // Create color from albedo - boost it significantly
-        // MCR albedo values are typically in 0.1-0.4 range
-        color = vec3(albedo * 3.0);
-        
-        // Add slight color variation from R/B for visual interest  
-        color.r += texColor.r * 0.1;
-        color.b += texColor.b * 0.1;
-        
-        color = clamp(color, 0.0, 1.0);
+        if (isMCRTexture) {
+            // MCR texture: Metallic-Cavity-Roughness format
+            // R = Metallic (0 = dielectric, 1 = metal)
+            // G = Cavity/AO (ambient occlusion detail)
+            // B = Roughness (0 = smooth, 1 = rough)
+            //
+            // The actual base color comes from the emat's Color_3 parameter.
+            
+            float metallic = texColor.r;
+            float cavity = texColor.g;  // AO/cavity for detail
+            float roughness = texColor.b;
+            
+            // Use base color from emat if available, otherwise neutral gray
+            vec3 surfaceColor = hasBaseColor ? baseColor : vec3(0.5, 0.5, 0.5);
+            
+            // Subtle cavity darkening (only in crevices, don't overdo it)
+            float cavityMult = mix(0.7, 1.0, cavity);
+            
+            // Metallic surfaces are slightly more reflective looking
+            float metallicBoost = mix(1.0, 1.1, metallic);
+            
+            color = surfaceColor * cavityMult * metallicBoost;
+            
+        } else {
+            // BCR/standard diffuse texture: RGB = base color
+            // If we have a color parameter from emat, use it as a tint/multiplier
+            // (For MatPBRBasic materials, Color is often a tint for the BCR texture)
+            if (hasBaseColor) {
+                // Apply color tint, but check if it's dark (could be unused/default)
+                float colorBrightness = (baseColor.r + baseColor.g + baseColor.b) / 3.0;
+                if (colorBrightness > 0.1) {
+                    // Non-trivial color - multiply (tint)
+                    color = texColor.rgb * baseColor * 2.0;  // 2x because colors are often 0.5ish
+                } else {
+                    // Very dark color - ignore it, use texture only
+                    color = texColor.rgb;
+                }
+            } else {
+                color = texColor.rgb;
+            }
+        }
+    } else if (hasBaseColor) {
+        // No texture but we have a base color from emat
+        color = baseColor;
     }
     
-    vec3 result = (ambient + diffuse) * color;
+    // Apply lighting
+    vec3 result = color * totalLight * lightColor;
+    
+    // Slight exposure boost
+    result *= 1.15;
+    
+    // Gamma correction (linear to sRGB)
+    result = pow(result, vec3(1.0/2.2));
+    
+    // Clamp
+    result = clamp(result, 0.0, 1.0);
+    
     FragColor = vec4(result, 1.0);
 }
 )";

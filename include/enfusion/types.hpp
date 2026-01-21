@@ -71,12 +71,22 @@ struct MaterialRange {
 };
 
 /**
- * XOB vertex structure.
+ * XOB vertex structure with full attribute support.
  */
 struct XobVertex {
     glm::vec3 position{0.0f};
     glm::vec3 normal{0.0f, 1.0f, 0.0f};
     glm::vec2 uv{0.0f};
+    glm::vec3 tangent{1.0f, 0.0f, 0.0f};    // Tangent vector for normal mapping
+    float tangent_sign{1.0f};                 // Handedness of tangent space (bitangent = cross(normal, tangent) * sign)
+    
+    // Skinning data (4 bone influences per vertex)
+    glm::uvec4 bone_indices{0, 0, 0, 0};     // Indices into bone array
+    glm::vec4 bone_weights{0.0f};             // Weights for each bone (should sum to 1.0)
+    
+    // Extra normal data (secondary normals or detail normals)
+    glm::vec3 extra_normal{0.0f, 1.0f, 0.0f};
+    glm::vec3 extra_tangent{1.0f, 0.0f, 0.0f};
     
     // Convenience accessors for individual components
     float x() const { return position.x; }
@@ -109,6 +119,51 @@ struct XobMaterial {
 };
 
 /**
+ * Collision object types from XOB COLL chunk.
+ */
+enum class XobCollisionType : uint8_t {
+    Complex = 0x03,     // Complex mesh collision (vehicle body, armor)
+    Simple = 0x05,      // Simple mesh collision (glass, small parts)
+    Dynamic = 0x07      // Dynamic collision (wheels, turrets, animated parts)
+};
+
+/**
+ * Collision object header from XOB COLL chunk (64 bytes).
+ * Contains transform and mesh reference information.
+ */
+struct XobCollisionObject {
+    XobCollisionType type = XobCollisionType::Simple;
+    uint8_t flags = 0;              // 0xFF = mesh collision, 0x02 = primitive
+    uint16_t name_index = 0;        // Index into HEAD string table
+    glm::mat3 rotation{1.0f};       // 3x3 rotation matrix (row-major)
+    glm::vec3 translation{0.0f};    // Translation/pivot point
+    uint16_t index_start = 0;       // First index reference
+    uint16_t index_end = 0;         // Last index + 1
+};
+
+/**
+ * Collision mesh data from XOB COLL chunk.
+ * Shared by all collision objects.
+ */
+struct XobCollisionMesh {
+    std::vector<glm::vec3> vertices;    // Collision vertices
+    std::vector<uint16_t> indices;      // Triangle indices (3 per triangle)
+    glm::vec3 bounds_min{0.0f};
+    glm::vec3 bounds_max{0.0f};
+};
+
+/**
+ * Spatial octree from XOB VOLM chunk.
+ * Used for fast collision queries and culling.
+ */
+struct XobOctree {
+    uint16_t depth = 0;             // Octree depth (typically 4)
+    uint16_t internal_nodes = 0;    // Count of internal nodes
+    uint16_t total_nodes = 0;       // Total node count
+    std::vector<uint8_t> data;      // Packed octree bitmask
+};
+
+/**
  * Parsed mesh data from XOB.
  */
 struct XobMesh {
@@ -117,6 +172,18 @@ struct XobMesh {
     std::vector<XobLod> lods;
     std::vector<XobMaterial> materials;
     std::vector<MaterialRange> material_ranges;  // Which triangles use which material
+    
+    // Collision data (from COLL chunk)
+    std::vector<XobCollisionObject> collision_objects;
+    XobCollisionMesh collision_mesh;
+    
+    // Spatial data (from VOLM chunk)
+    XobOctree octree;
+    
+    // Skeletal data
+    uint16_t bone_count = 0;                     // Number of bones (0 for static meshes)
+    std::vector<std::string> bone_names;         // Bone names from HEAD strings
+    
     uint32_t version = 0;
     glm::vec3 bounds_min{0.0f};
     glm::vec3 bounds_max{0.0f};

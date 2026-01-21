@@ -20,6 +20,9 @@ struct MaterialTextures {
     uint32_t diffuse = 0;   // OpenGL diffuse texture handle
     uint32_t normal = 0;    // OpenGL normal map handle
     bool enabled = true;    // Whether to render this material
+    bool is_mcr = false;    // True if texture is MCR format (NOT color, just PBR data)
+    glm::vec3 base_color{0.5f, 0.5f, 0.5f};  // Base color from emat (for MCR materials)
+    bool has_base_color = false;  // True if base_color was set from emat
 };
 
 /**
@@ -35,7 +38,8 @@ public:
 
     void set_mesh(std::shared_ptr<const XobMesh> mesh);
     void set_texture(uint32_t texture_id) { fallback_texture_ = texture_id; }
-    void set_material_texture(size_t material_index, uint32_t texture_id);
+    void set_material_texture(size_t material_index, uint32_t texture_id, bool is_mcr = false);
+    void set_material_color(size_t material_index, const glm::vec3& color);
     void set_material_enabled(size_t material_index, bool enabled);
     void render(const glm::mat4& view, const glm::mat4& projection);
 

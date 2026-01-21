@@ -8,6 +8,7 @@
 #include "gui/widgets.hpp"
 #include "enfusion/pak_manager.hpp"
 #include "enfusion/pak_index.hpp"
+#include "enfusion/logging.hpp"
 
 #include <imgui.h>
 
@@ -25,7 +26,7 @@ void SettingsDialog::render(bool* open) {
     
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(500, 450));
+    ImGui::SetNextWindowSize(ImVec2(500, 500));
     
     if (ImGui::BeginPopupModal("Settings", open, ImGuiWindowFlags_NoResize)) {
         render_content();
@@ -54,6 +55,11 @@ void SettingsDialog::render_content() {
         
         if (ImGui::BeginTabItem("Paths")) {
             render_paths_tab(settings);
+            ImGui::EndTabItem();
+        }
+        
+        if (ImGui::BeginTabItem("Logging")) {
+            render_logging_tab(settings);
             ImGui::EndTabItem();
         }
         
@@ -338,6 +344,72 @@ void SettingsDialog::render_paths_tab(AppSettings& settings) {
     if (ImGui::Button("Clear Recent Paths")) {
         recent_paths.clear();
     }
+}
+
+void SettingsDialog::render_logging_tab(AppSettings& settings) {
+    ImGui::Spacing();
+    
+    ImGui::Text("Log Level:");
+    widgets::HelpMarker("Higher log levels show more details. Debug is most verbose.");
+    
+    const char* log_levels[] = {"Debug", "Info", "Warning", "Error", "None"};
+    static int current_log_level = static_cast<int>(Logger::instance().get_level());
+    
+    if (ImGui::Combo("##LogLevel", &current_log_level, log_levels, IM_ARRAYSIZE(log_levels))) {
+        Logger::instance().set_level(static_cast<LogLevel>(current_log_level));
+        LOG_INFO("Settings", "Log level changed to: " << log_levels[current_log_level]);
+    }
+    
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    
+    static bool console_output = true;
+    if (ImGui::Checkbox("Console Output", &console_output)) {
+        Logger::instance().set_console_output(console_output);
+    }
+    widgets::HelpMarker("Write log messages to console (stdout/stderr)");
+    
+    ImGui::Spacing();
+    
+    ImGui::Text("Log File:");
+    static char log_path_buffer[512] = {0};
+    static bool log_to_file = false;
+    
+    ImGui::Checkbox("Enable File Logging", &log_to_file);
+    
+    if (log_to_file) {
+        ImGui::SetNextItemWidth(-80);
+        if (ImGui::InputText("##LogPath", log_path_buffer, sizeof(log_path_buffer))) {
+            // Path changed
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Browse##Log")) {
+            // Could add file browse dialog here
+        }
+        
+        if (ImGui::Button("Apply Log File")) {
+            if (strlen(log_path_buffer) > 0) {
+                if (Logger::instance().set_file(log_path_buffer)) {
+                    LOG_INFO("Settings", "Log file opened: " << log_path_buffer);
+                } else {
+                    LOG_ERROR("Settings", "Failed to open log file: " << log_path_buffer);
+                }
+            }
+        }
+    } else {
+        Logger::instance().close_file();
+    }
+    
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    
+    ImGui::Text("Troubleshooting Tips:");
+    ImGui::BulletText("Set log level to Debug for maximum detail");
+    ImGui::BulletText("Enable file logging to capture output");
+    ImGui::BulletText("Check logs for [ERROR] and [WARN] entries");
+    ImGui::BulletText("PAK/XOB parsing issues logged with file paths");
 }
 
 void SettingsDialog::apply_settings() {

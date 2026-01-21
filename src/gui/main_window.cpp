@@ -135,9 +135,14 @@ void MainWindow::render_title_bar() {
             if (ImGui::MenuItem("Open Addon...", "Ctrl+O")) open_addon_dialog();
             if (ImGui::MenuItem("Open Addons Folder...", "Ctrl+Shift+O")) open_addons_folder_dialog();
             ImGui::Separator();
-            if (ImGui::MenuItem("Export Selected...", "Ctrl+E", false, !selected_file_path_.empty())) show_export_dialog_ = true;
+            if (ImGui::MenuItem("Export Selected...", "Ctrl+E", false, !selected_file_path_.empty())) {
+                // Set the source as the current addon path (for single file export we still need addon context)
+                export_dialog_->set_source(current_addon_path_, false);
+                export_dialog_->set_selected_file(selected_file_path_);
+                show_export_dialog_ = true;
+            }
             if (ImGui::MenuItem("Export All...", "Ctrl+Shift+E", false, !current_addon_path_.empty())) {
-                export_dialog_->set_batch_mode(true);
+                export_dialog_->set_source(current_addon_path_, true);
                 show_export_dialog_ = true;
             }
             ImGui::Separator();

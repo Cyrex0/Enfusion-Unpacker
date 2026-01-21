@@ -8,6 +8,7 @@
 #include "enfusion/addon_extractor.hpp"
 #include "enfusion/compression.hpp"
 #include "enfusion/files.hpp"
+#include "enfusion/logging.hpp"
 
 #include <fstream>
 #include <algorithm>
@@ -23,7 +24,7 @@ bool AddonExtractor::load(const std::filesystem::path& addon_dir) {
     addon_dir_ = addon_dir;
     last_error_.clear();
     
-    std::cerr << "[AddonExtractor] Loading: " << addon_dir.string() << "\n";
+    LOG_INFO("AddonExtractor", "Loading: " << addon_dir.string());
     
     // Support both: directory containing data.pak, or direct PAK file path
     if (std::filesystem::is_regular_file(addon_dir)) {
@@ -31,31 +32,31 @@ bool AddonExtractor::load(const std::filesystem::path& addon_dir) {
         pak_path_ = addon_dir;
         addon_dir_ = addon_dir.parent_path();
         rdb_path_ = addon_dir_ / "resourceDatabase.rdb";
-        std::cerr << "[AddonExtractor] Direct PAK file mode\n";
+        LOG_DEBUG("AddonExtractor", "Direct PAK file mode");
     } else {
         // Directory containing data.pak
         pak_path_ = addon_dir / "data.pak";
         rdb_path_ = addon_dir / "resourceDatabase.rdb";
-        std::cerr << "[AddonExtractor] Directory mode, PAK: " << pak_path_.string() << "\n";
+        LOG_DEBUG("AddonExtractor", "Directory mode, PAK: " << pak_path_.string());
     }
     
     if (!std::filesystem::exists(pak_path_)) {
         set_error("PAK file not found: " + pak_path_.string());
-        std::cerr << "[AddonExtractor] " << last_error_ << "\n";
+        LOG_ERROR("AddonExtractor", last_error_);
         return false;
     }
     
-    std::cerr << "[AddonExtractor] PAK exists, size: " << std::filesystem::file_size(pak_path_) << " bytes\n";
+    LOG_DEBUG("AddonExtractor", "PAK exists, size: " << std::filesystem::file_size(pak_path_) << " bytes");
     
     // Initialize and open PAK reader
     pak_reader_ = std::make_unique<PakReader>();
     if (!pak_reader_->open(pak_path_)) {
         set_error("Failed to parse PAK file (invalid format?): " + pak_path_.string());
-        std::cerr << "[AddonExtractor] " << last_error_ << "\n";
+        LOG_ERROR("AddonExtractor", last_error_);
         return false;
     }
     
-    std::cout << "PAK file loaded: " << pak_reader_->file_count() << " entries" << std::endl;
+    LOG_INFO("AddonExtractor", "PAK file loaded: " << pak_reader_->file_count() << " entries");
     
     // Build file list from PAK entries (the authoritative source)
     files_.clear();
@@ -68,7 +69,7 @@ bool AddonExtractor::load(const std::filesystem::path& addon_dir) {
         files_.push_back(file);
     }
     
-    std::cout << "Files indexed: " << files_.size() << " files" << std::endl;
+    LOG_INFO("AddonExtractor", "Files indexed: " << files_.size() << " files");
     
     loaded_ = true;
     return true;
@@ -87,14 +88,14 @@ std::vector<uint8_t> AddonExtractor::read_file(const RdbFile& file) {
     // Use PakReader to read the file data correctly
     if (!pak_reader_ || !pak_reader_->is_open()) {
         set_error("Cannot read file: PAK reader not initialized");
-        std::cerr << "[AddonExtractor] " << last_error_ << std::endl;
+        LOG_ERROR("AddonExtractor", last_error_);
         return {};
     }
     
     auto data = pak_reader_->read_file(file.path);
     if (data.empty()) {
         set_error("Failed to read file from PAK: " + file.path);
-        std::cerr << "[AddonExtractor] " << last_error_ << std::endl;
+        LOG_WARN("AddonExtractor", last_error_);
     }
     return data;
 }
@@ -103,14 +104,14 @@ std::vector<uint8_t> AddonExtractor::read_file(const std::string& path) {
     // Use PakReader directly - it has the correct path->offset mapping
     if (!pak_reader_ || !pak_reader_->is_open()) {
         set_error("Cannot read file: PAK reader not initialized");
-        std::cerr << "[AddonExtractor] " << last_error_ << std::endl;
+        LOG_ERROR("AddonExtractor", last_error_);
         return {};
     }
     
     auto data = pak_reader_->read_file(path);
     if (data.empty()) {
         set_error("Failed to read file from PAK: " + path);
-        std::cerr << "[AddonExtractor] " << last_error_ << std::endl;
+        LOG_WARN("AddonExtractor", last_error_);
     }
     return data;
 }

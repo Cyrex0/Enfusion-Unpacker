@@ -15,6 +15,7 @@
  */
 
 #include "enfusion/edds_converter.hpp"
+#include "enfusion/logging.hpp"
 #include <lz4.h>
 #include <cstring>
 #include <algorithm>
@@ -162,18 +163,24 @@ bool EddsConverter::is_edds() const {
 
 std::vector<uint8_t> EddsConverter::convert() {
     if (!is_edds()) {
+        LOG_DEBUG("EddsConverter", "Not EDDS format, returning as-is (" << data_.size() << " bytes)");
         return std::vector<uint8_t>(data_.begin(), data_.end());
     }
     
     size_t header_size = 128;
     if (data_.size() >= 88 && std::memcmp(data_.data() + 84, DX10_FOURCC, 4) == 0) {
         header_size = 148;
+        LOG_DEBUG("EddsConverter", "DX10 extended header detected");
     }
     
     parse_mip_table(header_size);
     if (mip_table_.empty()) {
+        LOG_WARNING("EddsConverter", "No mip table found, returning raw data");
         return std::vector<uint8_t>(data_.begin(), data_.end());
     }
+    
+    LOG_DEBUG("EddsConverter", "Converting: " << width_ << "x" << height_ 
+              << " " << format_ << " (" << mip_count_ << " mips)");
     
     std::vector<uint8_t> output(data_.begin(), data_.begin() + header_size);
     
@@ -188,7 +195,11 @@ std::vector<uint8_t> EddsConverter::convert() {
         uint32_t mip_level = static_cast<uint32_t>(mip_count_ - 1 - i);
         size_t expected_size = calc_mip_size(mip_level);
         
-        if (data_pos + compressed_size > data_.size()) break;
+        if (data_pos + compressed_size > data_.size()) {
+            LOG_ERROR("EddsConverter", "Mip " << i << " exceeds file bounds: offset=" 
+                      << data_pos << " size=" << compressed_size << " filesize=" << data_.size());
+            break;
+        }
         
         const uint8_t* chunk = data_.data() + data_pos;
         data_pos += compressed_size;
@@ -201,15 +212,19 @@ std::vector<uint8_t> EddsConverter::convert() {
             
             // If stream failed, try simple block decompression
             if (decompressed.empty() || decompressed.size() < expected_size / 2) {
+                LOG_DEBUG("EddsConverter", "Mip " << i << " stream decomp failed, trying block");
                 decompressed = decompress_lz4_block(chunk, compressed_size, expected_size);
             }
             
             // Pad if still too small
             if (decompressed.size() < expected_size) {
+                LOG_DEBUG("EddsConverter", "Mip " << i << " padding: " << decompressed.size() 
+                          << " -> " << expected_size);
                 decompressed.resize(expected_size, 0);
             }
             mip_data.push_back(std::move(decompressed));
         } else {
+            LOG_WARNING("EddsConverter", "Unknown mip tag: " << std::string(tag.begin(), tag.end()));
             mip_data.emplace_back(chunk, chunk + compressed_size);
         }
     }
@@ -218,6 +233,7 @@ std::vector<uint8_t> EddsConverter::convert() {
         output.insert(output.end(), it->begin(), it->end());
     }
     
+    LOG_DEBUG("EddsConverter", "Converted: " << output.size() << " bytes output");
     return output;
 }
 

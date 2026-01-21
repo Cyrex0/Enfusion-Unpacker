@@ -598,4 +598,160 @@ size_t PakIndex::total_paks() const {
     return count;
 }
 
+std::vector<PakIndex::TextureSearchResult> PakIndex::search_textures_for_material(
+    const std::string& material_name) const {
+    
+    std::vector<TextureSearchResult> results;
+    if (!db_ || !ready_) return results;
+    
+    // Normalize material name
+    std::string mat_lower = material_name;
+    std::transform(mat_lower.begin(), mat_lower.end(), mat_lower.begin(), ::tolower);
+    
+    // Remove extension if present
+    size_t ext_pos = mat_lower.rfind('.');
+    if (ext_pos != std::string::npos) {
+        mat_lower = mat_lower.substr(0, ext_pos);
+    }
+    
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    
+    // Search for textures that start with the material name
+    // This finds textures like "helmet_bcr.edds" when searching for "helmet"
+    static const char* sql = R"(
+        SELECT f.path, p.path as pak_path 
+        FROM files f
+        JOIN paks p ON f.pak_id = p.id
+        WHERE f.path_lower LIKE ? 
+          AND (f.path_lower LIKE '%.edds' OR f.path_lower LIKE '%.dds')
+        ORDER BY LENGTH(f.path) ASC
+        LIMIT 100
+    )";
+    
+    sqlite3_stmt* stmt = get_or_prepare_stmt("search_textures_for_material", sql);
+    if (!stmt) return results;
+    
+    // Search pattern: %/materialname% (anywhere in path, starts with material name in filename)
+    std::string pattern = "%" + mat_lower + "%";
+    sqlite3_bind_text(stmt, 1, pattern.c_str(), -1, SQLITE_TRANSIENT);
+    
+    // Suffixes to skip (non-diffuse textures)
+    std::vector<std::string> skip_suffixes = {
+        "_global_mask", "_mask", "_nmo", "_normal", "_nm", "_n",
+        "_smdi", "_specular", "_spec", "_ao", "_occlusion",
+        "_roughness", "_metallic", "_height", "_emissive", "_opacity", "_alpha", "_vfx"
+    };
+    
+    // Diffuse suffix priorities
+    std::vector<std::pair<std::string, int>> diffuse_priorities = {
+        {"_bcr", 0}, {"_mcr", 1}, {"_co", 2}, {"_diffuse", 3},
+        {"_diff", 4}, {"_d", 5}, {"_albedo", 6}, {"_color", 7}, {"_basecolor", 8}
+    };
+    
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* file_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* pak_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        
+        if (!file_path || !pak_path) continue;
+        
+        std::string path_str = file_path;
+        std::string path_lower = path_str;
+        std::transform(path_lower.begin(), path_lower.end(), path_lower.begin(), ::tolower);
+        
+        // Extract filename without extension
+        size_t slash_pos = path_lower.rfind('/');
+        std::string filename = (slash_pos != std::string::npos) ? 
+                               path_lower.substr(slash_pos + 1) : path_lower;
+        size_t edds_pos = filename.rfind(".edds");
+        if (edds_pos == std::string::npos) edds_pos = filename.rfind(".dds");
+        if (edds_pos != std::string::npos) filename = filename.substr(0, edds_pos);
+        
+        // Check if filename starts with material name
+        if (filename.find(mat_lower) != 0) continue;
+        
+        // Skip non-diffuse textures
+        bool should_skip = false;
+        for (const auto& skip : skip_suffixes) {
+            if (filename.length() >= skip.length() &&
+                filename.substr(filename.length() - skip.length()) == skip) {
+                should_skip = true;
+                break;
+            }
+        }
+        if (should_skip) continue;
+        
+        // Determine priority
+        int priority = 100;
+        if (filename == mat_lower) {
+            priority = 9;  // Exact match
+        } else {
+            for (const auto& [suffix, prio] : diffuse_priorities) {
+                if (filename.length() >= suffix.length() &&
+                    filename.substr(filename.length() - suffix.length()) == suffix) {
+                    priority = prio;
+                    break;
+                }
+            }
+        }
+        
+        results.push_back({path_str, std::filesystem::path(pak_path), priority});
+    }
+    
+    // Sort by priority
+    std::sort(results.begin(), results.end(), 
+              [](const auto& a, const auto& b) { return a.priority < b.priority; });
+    
+    return results;
+}
+
+std::vector<PakIndex::TextureSearchResult> PakIndex::search_files_by_name(
+    const std::string& name_pattern, const std::string& extension) const {
+    
+    std::vector<TextureSearchResult> results;
+    if (!db_ || !ready_) return results;
+    
+    std::string pattern_lower = name_pattern;
+    std::transform(pattern_lower.begin(), pattern_lower.end(), pattern_lower.begin(), ::tolower);
+    
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    
+    std::string sql = R"(
+        SELECT f.path, p.path as pak_path 
+        FROM files f
+        JOIN paks p ON f.pak_id = p.id
+        WHERE f.path_lower LIKE ?
+    )";
+    
+    if (!extension.empty()) {
+        sql += " AND f.path_lower LIKE ?";
+    }
+    sql += " ORDER BY LENGTH(f.path) ASC LIMIT 200";
+    
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        return results;
+    }
+    
+    std::string search = "%" + pattern_lower + "%";
+    sqlite3_bind_text(stmt, 1, search.c_str(), -1, SQLITE_TRANSIENT);
+    
+    if (!extension.empty()) {
+        std::string ext_pattern = "%." + extension;
+        std::transform(ext_pattern.begin(), ext_pattern.end(), ext_pattern.begin(), ::tolower);
+        sqlite3_bind_text(stmt, 2, ext_pattern.c_str(), -1, SQLITE_TRANSIENT);
+    }
+    
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* file_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* pak_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        
+        if (file_path && pak_path) {
+            results.push_back({file_path, std::filesystem::path(pak_path), 0});
+        }
+    }
+    
+    sqlite3_finalize(stmt);
+    return results;
+}
+
 } // namespace enfusion

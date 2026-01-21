@@ -62,6 +62,18 @@ public:
     // Find all PAKs that might contain files matching a pattern
     std::vector<std::filesystem::path> find_paks_for_pattern(const std::string& pattern) const;
     
+    // Search for texture files by material name (returns file paths with their PAKs)
+    struct TextureSearchResult {
+        std::string file_path;
+        std::filesystem::path pak_path;
+        int priority;  // Lower = better match
+    };
+    std::vector<TextureSearchResult> search_textures_for_material(const std::string& material_name) const;
+    
+    // Search for any file by partial name match
+    std::vector<TextureSearchResult> search_files_by_name(const std::string& name_pattern, 
+                                                          const std::string& extension = "") const;
+    
     // Get stats
     size_t total_files() const;
     size_t total_paks() const;
