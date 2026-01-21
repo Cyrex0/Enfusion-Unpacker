@@ -91,6 +91,15 @@ MainWindow::MainWindow() {
             show_text_viewer_ = true;
         }
     };
+    
+    // Hook up export callback from context menu - exports the current mod pack
+    file_browser_->on_export_requested = [this](const std::string& file_path) {
+        if (!current_addon_path_.empty()) {
+            export_dialog_->set_source(current_addon_path_);
+            export_dialog_->init_from_settings();
+            show_export_dialog_ = true;
+        }
+    };
 }
 
 MainWindow::~MainWindow() = default;
@@ -135,14 +144,16 @@ void MainWindow::render_title_bar() {
             if (ImGui::MenuItem("Open Addon...", "Ctrl+O")) open_addon_dialog();
             if (ImGui::MenuItem("Open Addons Folder...", "Ctrl+Shift+O")) open_addons_folder_dialog();
             ImGui::Separator();
-            if (ImGui::MenuItem("Export Selected...", "Ctrl+E", false, !selected_file_path_.empty())) {
-                // Set the source as the current addon path (for single file export we still need addon context)
-                export_dialog_->set_source(current_addon_path_, false);
-                export_dialog_->set_selected_file(selected_file_path_);
+            if (ImGui::MenuItem("Export Selected...", "Ctrl+E", false, !current_addon_path_.empty())) {
+                // Export the currently selected mod pack (entire addon)
+                export_dialog_->set_source(current_addon_path_);
+                export_dialog_->init_from_settings();
                 show_export_dialog_ = true;
             }
-            if (ImGui::MenuItem("Export All...", "Ctrl+Shift+E", false, !current_addon_path_.empty())) {
-                export_dialog_->set_source(current_addon_path_, true);
+            if (ImGui::MenuItem("Batch Export...", "Ctrl+Shift+E", false, !addon_browser_->get_addons().empty())) {
+                // Batch export - show dialog with addon selection
+                export_dialog_->set_batch_mode(addon_browser_->get_addons());
+                export_dialog_->init_from_settings();
                 show_export_dialog_ = true;
             }
             ImGui::Separator();
@@ -160,8 +171,14 @@ void MainWindow::render_title_bar() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Tools")) {
-            if (ImGui::MenuItem("Batch Extract...")) {}
-            if (ImGui::MenuItem("Convert Textures...")) {}
+            if (ImGui::MenuItem("Batch Extract...", nullptr, false, !addon_browser_->get_addons().empty())) {
+                export_dialog_->set_batch_mode(addon_browser_->get_addons());
+                export_dialog_->init_from_settings();
+                show_export_dialog_ = true;
+            }
+            if (ImGui::MenuItem("Convert Textures...", nullptr, false, false)) {
+                // TODO: Implement standalone texture converter dialog
+            }
             ImGui::Separator();
             if (ImGui::MenuItem("Settings...", "Ctrl+,")) show_settings_ = true;
             ImGui::EndMenu();

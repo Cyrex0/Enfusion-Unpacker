@@ -27,6 +27,7 @@
 #include <sstream>
 #include <cfloat>
 #include <map>
+#include <set>
 
 namespace enfusion {
 
@@ -101,38 +102,46 @@ static inline float read_f32_le(const uint8_t* p) {
 /**
  * Convert IEEE 754 half-precision (16-bit) float to single-precision (32-bit) float
  * Layout: 1 sign bit, 5 exponent bits, 10 mantissa bits
+ * 
+ * IMPORTANT: XOB UV coordinates appear to use half-float format.
+ * This function handles all cases including denormalized numbers properly.
  */
 static inline float half_to_float(uint16_t h) {
+    // Use a union for type-safe bit manipulation
+    union { uint32_t u; float f; } result;
+    
     uint32_t sign = (h >> 15) & 0x1;
     uint32_t exp = (h >> 10) & 0x1F;
     uint32_t mant = h & 0x3FF;
     
-    uint32_t f;
     if (exp == 0) {
         if (mant == 0) {
             // Zero (signed)
-            f = sign << 31;
+            result.u = sign << 31;
         } else {
-            // Denormalized number - convert to normalized
-            exp = 1;
-            while ((mant & 0x400) == 0) {
-                mant <<= 1;
-                exp--;
-            }
-            mant &= 0x3FF;
-            f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
+            // Denormalized half -> normalized float
+            // Denorm half: value = (-1)^sign * 2^(-14) * (0.mant)
+            // Need to normalize by finding leading 1 bit
+            float value = static_cast<float>(mant) / 1024.0f;  // mant / 2^10
+            value *= (1.0f / 16384.0f);  // * 2^(-14)
+            result.f = sign ? -value : value;
         }
     } else if (exp == 31) {
-        // Inf or NaN
-        f = (sign << 31) | 0x7F800000 | (mant << 13);
+        // Inf or NaN - map to float inf/nan
+        if (mant == 0) {
+            // Infinity
+            result.u = (sign << 31) | 0x7F800000;
+        } else {
+            // NaN - preserve sign but use quiet NaN
+            result.u = (sign << 31) | 0x7FC00000;
+        }
     } else {
-        // Normalized number
-        f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
+        // Normalized number: value = (-1)^sign * 2^(exp-15) * (1.mant)
+        // Convert to float: exp_f = exp - 15 + 127 = exp + 112
+        result.u = (sign << 31) | ((exp + 112) << 23) | (mant << 13);
     }
     
-    float result;
-    std::memcpy(&result, &f, sizeof(float));
-    return result;
+    return result.f;
 }
 
 /**
@@ -433,11 +442,33 @@ static bool parse_mesh_from_region(
         return false;
     }
     
-    // Extract indices (first array only - the actual vertex indices)
+    // Debug: compare first vs second index array to understand their difference
+    size_t differ_count = 0;
+    for (uint32_t i = 0; i < index_count; i++) {
+        uint16_t idx1 = read_u16_le(region.data() + i * 2);
+        uint16_t idx2 = read_u16_le(region.data() + idx_array_size + i * 2);
+        if (idx1 != idx2) {
+            differ_count++;
+            if (differ_count <= 5) {
+                LOG_DEBUG("XobParser", "Index array diff at " << i << ": arr1=" << idx1 << " arr2=" << idx2);
+            }
+        }
+    }
+    if (differ_count > 0) {
+        LOG_INFO("XobParser", "WARNING: Index arrays differ! " << differ_count << " differences");
+    } else {
+        LOG_DEBUG("XobParser", "Index arrays are identical");
+    }
+    
+    // Array 1 is the geometry index buffer (correct positions)
+    // Array 2 appears to be something else (LOD, collision, etc.) - causes broken geometry
+    // Always use Array 1 for rendering
+    
+    // Extract indices from Array 1
     mesh.indices.clear();
     mesh.indices.reserve(index_count);
     for (uint32_t i = 0; i < index_count && i * 2 + 1 < idx_array_size; i++) {
-        uint16_t idx = read_u16_le(region.data() + i * 2);
+        uint16_t idx = read_u16_le(region.data() + i * 2);  // Always use Array 1
         mesh.indices.push_back(static_cast<uint32_t>(idx));
     }
     
@@ -563,10 +594,13 @@ static bool parse_mesh_from_region(
             uint16_t u_raw = read_u16_le(region.data() + off);
             uint16_t v_raw = read_u16_le(region.data() + off + 2);
             
-            // UVs are normalized unsigned 16-bit integers
-            // Range 0-65535 maps to 0.0-1.0
-            float u = static_cast<float>(u_raw) / 65535.0f;
-            float v = static_cast<float>(v_raw) / 65535.0f;
+            // UVs are stored as IEEE 754 half-precision floats (16 bits each)
+            // Use half_to_float() to convert properly
+            float u = half_to_float(u_raw);
+            float v = half_to_float(v_raw);
+            
+            // Clamp to valid range (half-float can represent values outside 0-1)
+            // Some UVs may be tiled so allow values outside 0-1
             
             mesh.vertices[i].uv.x = u;
             mesh.vertices[i].uv.y = 1.0f - v;  // Flip V for OpenGL convention
@@ -574,11 +608,11 @@ static bool parse_mesh_from_region(
             
             // Debug first few raw values
             if (i < 5) {
-                std::cerr << "[XOB] UV[" << i << "] u16: u=0x" << std::hex << u_raw << " v=0x" << v_raw << std::dec
+                std::cerr << "[XOB] UV[" << i << "] half: u=0x" << std::hex << u_raw << " v=0x" << v_raw << std::dec
                           << " -> (" << mesh.vertices[i].uv.x << ", " << mesh.vertices[i].uv.y << ")\n";
             }
         }
-        std::cerr << "[XOB] Parsed " << valid_uvs << " UVs (stride=" << uv_stride << ")\n";
+        std::cerr << "[XOB] Parsed " << valid_uvs << " UVs as half-float (stride=" << uv_stride << ")\n";
         attr_offset += vertex_count * uv_stride;
     }
     
@@ -951,75 +985,225 @@ static std::vector<MaterialRange> extract_material_ranges(const uint8_t* data, s
     
     LOG_DEBUG("XobParser", "Submesh data: " << after_size << " bytes after LZO4 descriptors");
     
-    // Map to store FIRST index count seen for each material (except material 0)
-    std::map<uint32_t, uint32_t> mat_index_counts;
+    // Dump raw submesh data for analysis
+    std::ostringstream raw_hex;
+    raw_hex << "Submesh raw (first 128 bytes): ";
+    for (size_t i = 0; i < std::min<size_t>(128, after_size); i++) {
+        raw_hex << std::hex << std::setw(2) << std::setfill('0') << (int)after[i] << " ";
+        if ((i + 1) % 16 == 0) raw_hex << "| ";
+    }
+    LOG_DEBUG("XobParser", raw_hex.str());
     
-    // Scan for 0xFFFF markers and extract index counts
-    // Index count is at offset -6 from the FFFF marker
-    for (size_t pos = 6; pos + 4 <= after_size; pos++) {
+    // Map to store material info: first entry has start position, count
+    // Structure appears to be: [...][idx_count:u16][lod:u16][0][FFFF][mat_idx:u16][flags:u16]
+    // But we might also have: idx_start somewhere before
+    struct SubmeshEntry {
+        uint32_t material_index;
+        uint32_t index_start;   // NEW: try to find this
+        uint32_t index_count;
+        uint16_t lod_index;
+        uint16_t flags;
+    };
+    std::vector<SubmeshEntry> submesh_entries;
+    
+    // Scan for 0xFFFF markers and extract ALL surrounding data
+    for (size_t pos = 6; pos + 6 <= after_size; pos++) {
         if (after[pos] == 0xFF && after[pos+1] == 0xFF) {
-            uint16_t mat_idx = read_u16_le(after + pos + 2);
+            SubmeshEntry entry;
+            entry.material_index = read_u16_le(after + pos + 2);
+            entry.flags = read_u16_le(after + pos + 4);
             
-            // Only accept valid material indices > 0
-            // Material 0 entries are render passes, not geometry - skip them
-            if (mat_idx > 0 && mat_idx < num_materials) {
-                // Read index count at offset -6 from FFFF marker
-                uint32_t index_count = read_u16_le(after + pos - 6);
+            // Data before FFFF marker
+            entry.index_count = read_u16_le(after + pos - 6);
+            entry.lod_index = read_u16_le(after + pos - 4);
+            // pos - 2 is reserved/zero
+            
+            // Look for potential index_start (try pos - 8 or pos - 10)
+            uint16_t potential_start1 = (pos >= 8) ? read_u16_le(after + pos - 8) : 0;
+            uint16_t potential_start2 = (pos >= 10) ? read_u16_le(after + pos - 10) : 0;
+            
+            // Only process valid materials
+            if (entry.material_index < num_materials) {
+                LOG_DEBUG("XobParser", "FFFF at +" << pos 
+                    << ": mat=" << entry.material_index 
+                    << " idx_count=" << entry.index_count 
+                    << " lod=" << entry.lod_index
+                    << " flags=0x" << std::hex << entry.flags << std::dec
+                    << " | before: [" << potential_start2 << ", " << potential_start1 << "]");
                 
-                // Only use the FIRST entry for each material
-                if (mat_index_counts.find(mat_idx) == mat_index_counts.end()) {
-                    mat_index_counts[mat_idx] = index_count;
-                    LOG_DEBUG("XobParser", "Submesh: mat=" << mat_idx << " index_count=" << index_count);
-                }
+                entry.index_start = 0; // Unknown for now
+                submesh_entries.push_back(entry);
             }
-            pos += 3; // Skip past this marker
+            pos += 5; // Skip past this marker
         }
     }
     
-    LOG_DEBUG("XobParser", "Found index counts for " << mat_index_counts.size() << " materials (excluding mat 0)");
+    // NEW APPROACH: Process blocks in ORDER (not by material index)
+    // The index buffer is arranged to match block order, not material order
     
-    // Calculate material 0's index count as the remainder
-    uint32_t sum_others = 0;
-    for (const auto& kv : mat_index_counts) {
-        sum_others += kv.second;
+    // Structure to hold block info in order
+    struct BlockEntry {
+        size_t position;        // Position in submesh data
+        uint32_t material_index;
+        uint32_t index_count;
+        uint16_t lod;
+        uint16_t flags;
+    };
+    std::vector<BlockEntry> all_blocks;
+    
+    // First pass: collect ALL blocks in order
+    for (size_t pos = 6; pos + 6 <= after_size; pos++) {
+        if (after[pos] == 0xFF && after[pos+1] == 0xFF) {
+            BlockEntry entry;
+            entry.position = pos;
+            entry.material_index = read_u16_le(after + pos + 2);
+            entry.flags = read_u16_le(after + pos + 4);
+            entry.index_count = read_u16_le(after + pos - 6);
+            entry.lod = read_u16_le(after + pos - 4);
+            
+            if (entry.material_index < num_materials) {
+                all_blocks.push_back(entry);
+                LOG_DEBUG("XobParser", "Block at +" << pos << ": mat=" << entry.material_index 
+                          << " idx_count=" << entry.index_count << " lod=" << entry.lod 
+                          << " flags=0x" << std::hex << entry.flags << std::dec);
+            }
+            pos += 5;
+        }
     }
-    uint32_t mat0_indices = (sum_others < total_indices) ? (total_indices - sum_others) : 0;
-    mat_index_counts[0] = mat0_indices;
     
-    LOG_DEBUG("XobParser", "Material 0 implicit index count: " << mat0_indices 
-              << " (total=" << total_indices << " - others=" << sum_others << ")");
+    LOG_DEBUG("XobParser", "Found " << all_blocks.size() << " total submesh blocks");
     
-    // Build material ranges from index counts
-    // Ranges are sequential in index buffer order (sorted by material index)
-    uint32_t current_index = 0;
-    for (const auto& kv : mat_index_counts) {
-        uint32_t mat_idx = kv.first;
-        uint32_t idx_count = kv.second;
+    // Find which LOD levels are present
+    std::set<uint16_t> lod_levels;
+    for (const auto& block : all_blocks) {
+        lod_levels.insert(block.lod);
+    }
+    
+    // Prefer LOD 0 if available, otherwise use minimum LOD
+    uint16_t target_lod = 0;
+    if (lod_levels.find(0) == lod_levels.end() && !lod_levels.empty()) {
+        target_lod = *lod_levels.begin(); // Use lowest available LOD
+    }
+    
+    LOG_DEBUG("XobParser", "Target LOD: " << target_lod 
+              << " (available: " << lod_levels.size() << " levels)");
+    
+    // Second pass: extract ALL blocks at target LOD level
+    // IMPORTANT: Include ALL pass types (0x01, 0x02, etc.) as they all contain valid geometry
+    // The pass type flag indicates render pass (opaque, transparent, etc.) but ALL are part of the mesh
+    std::map<uint32_t, uint32_t> mat_first_count; // material -> first seen index_count
+    std::vector<std::pair<uint32_t, uint32_t>> ordered_entries; // (mat_idx, index_count) in block order
+    
+    for (const auto& block : all_blocks) {
+        // Only process blocks at target LOD
+        if (block.lod != target_lod) continue;
+        
+        // First occurrence of this material at this LOD (any pass type)
+        if (mat_first_count.find(block.material_index) == mat_first_count.end()) {
+            mat_first_count[block.material_index] = block.index_count;
+            ordered_entries.push_back({block.material_index, block.index_count});
+            LOG_DEBUG("XobParser", "Using block: mat=" << block.material_index 
+                      << " index_count=" << block.index_count
+                      << " flags=0x" << std::hex << (int)block.flags << std::dec);
+        }
+    }
+    
+    // NOTE: Do NOT add materials from other LODs - they have 0 triangles at target LOD
+    // The geometry at LOD 0 only contains triangles for materials with LOD 0 blocks
+    
+    LOG_DEBUG("XobParser", "Using " << ordered_entries.size() << " blocks at LOD " << target_lod);
+    
+    // Calculate sum of all explicit entries
+    uint32_t explicit_sum = 0;
+    for (const auto& entry : ordered_entries) {
+        explicit_sum += entry.second;
+    }
+    
+    // Check if explicit entries exceed total - if so, mat0 entries are multi-pass (overlapping)
+    // In that case, use implicit calculation for mat0
+    bool mat0_is_implicit = false;
+    uint32_t mat0_explicit_count = 0;
+    for (const auto& entry : ordered_entries) {
+        if (entry.first == 0) {
+            mat0_explicit_count = entry.second;
+            break;
+        }
+    }
+    
+    // Calculate what mat0 SHOULD be if implicit
+    uint32_t sum_others = explicit_sum - mat0_explicit_count;
+    uint32_t mat0_implicit = (sum_others < total_indices) ? (total_indices - sum_others) : 0;
+    
+    LOG_DEBUG("XobParser", "Mat0 explicit=" << mat0_explicit_count << ", implicit=" << mat0_implicit 
+              << ", sum_others=" << sum_others << ", explicit_sum=" << explicit_sum);
+    
+    // If explicit sum exceeds total, mat0's explicit entry includes multi-pass data
+    // Use implicit calculation instead
+    if (explicit_sum > total_indices) {
+        mat0_is_implicit = true;
+        LOG_DEBUG("XobParser", "Explicit sum (" << explicit_sum << ") > total (" << total_indices 
+                  << "), using implicit mat0=" << mat0_implicit);
+    }
+    
+    // CRITICAL: The index buffer is organized by MATERIAL INDEX ORDER (0, 1, 2, ...)
+    // NOT by block order in the header! Sort entries by material index.
+    
+    // Build map from material index to index count
+    std::map<uint32_t, uint32_t> mat_to_count;
+    for (const auto& entry : ordered_entries) {
+        uint32_t mat_idx = entry.first;
+        uint32_t idx_count = entry.second;
+        
+        // Only store first occurrence (already filtered above)
+        if (mat_to_count.find(mat_idx) == mat_to_count.end()) {
+            mat_to_count[mat_idx] = idx_count;
+        }
+    }
+    
+    // Apply implicit mat0 calculation if needed
+    // ONLY if mat0 had explicit blocks at target LOD (multi-pass case)
+    // Do NOT add mat0 if it had no blocks at target LOD
+    if (mat0_is_implicit && mat_to_count.find(0) != mat_to_count.end()) {
+        mat_to_count[0] = mat0_implicit;
+        LOG_DEBUG("XobParser", "Applied implicit mat0: " << mat0_implicit);
+    }
+    // NOTE: If mat0 has no blocks at target LOD, it has 0 triangles - don't add it
+    
+    LOG_DEBUG("XobParser", "Building ranges in MATERIAL INDEX ORDER (not block order)");
+    
+    // Build material ranges in MATERIAL INDEX ORDER (0, 1, 2, ...)
+    // The std::map iterates in key order, which is material index order
+    uint32_t current_tri = 0;
+    for (const auto& [mat_idx, idx_count_raw] : mat_to_count) {
+        uint32_t idx_count = idx_count_raw;
         
         // Skip materials with zero indices
         if (idx_count == 0) continue;
         
-        // Convert to triangle counts
+        // Convert to triangle count (round down)
         uint32_t tri_count = idx_count / 3;
-        uint32_t tri_start = current_index / 3;
+        if (tri_count == 0) continue;
         
         // Clamp to total triangles
-        if (tri_start >= total_triangles) {
+        if (current_tri >= total_triangles) {
             LOG_DEBUG("XobParser", "Skipping mat " << mat_idx << " - start beyond total");
             continue;
         }
-        if (tri_start + tri_count > total_triangles) {
-            tri_count = total_triangles - tri_start;
+        if (current_tri + tri_count > total_triangles) {
+            tri_count = total_triangles - current_tri;
         }
         
         MaterialRange r;
         r.material_index = mat_idx;
-        r.triangle_start = tri_start;
-        r.triangle_end = tri_start + tri_count;
+        r.triangle_start = current_tri;
+        r.triangle_end = current_tri + tri_count;
         r.triangle_count = tri_count;
         result.push_back(r);
         
-        current_index += idx_count;
+        LOG_DEBUG("XobParser", "  Range: mat=" << mat_idx << " tris=" << current_tri 
+                  << "-" << (current_tri + tri_count));
+        
+        current_tri += tri_count;
     }
     
     // If no ranges were created, fall back to single material

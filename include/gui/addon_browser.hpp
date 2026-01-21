@@ -30,6 +30,9 @@ public:
     void refresh();
 
     std::function<void(const fs::path&)> on_addon_selected;
+    
+    // Get list of all scanned addons
+    const std::vector<AddonInfo>& get_addons() const { return addons_; }
 
 private:
     void render_addon_card(const AddonInfo& addon, int index);

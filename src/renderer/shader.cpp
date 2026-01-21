@@ -195,7 +195,19 @@ uniform vec3 baseColor;     // Base color from emat (for MCR materials)
 uniform bool useTexture;
 uniform bool isMCRTexture;  // True for _MCR textures (Metallic-Cavity-Roughness)
 uniform bool hasBaseColor;  // True if baseColor was set from emat
+uniform bool debugMaterialColors;  // Debug: show material colors instead of textures
+uniform int debugMaterialIndex;    // Debug: which material (for coloring)
 uniform sampler2D diffuseMap;
+
+// Hash function for deterministic material colors
+vec3 hashMaterialColor(int matIdx) {
+    // Generate unique colors for each material index
+    float r = fract(sin(float(matIdx) * 12.9898) * 43758.5453);
+    float g = fract(sin(float(matIdx) * 78.233 + 1.0) * 43758.5453);
+    float b = fract(sin(float(matIdx) * 39.425 + 2.0) * 43758.5453);
+    // Make colors more saturated and distinct
+    return vec3(r, g, b) * 0.6 + vec3(0.2);
+}
 
 void main() {
     vec3 norm = normalize(Normal);
@@ -218,6 +230,15 @@ void main() {
                        fillNdotL +       // Fill light
                        skyNdotL * 0.15 + // Sky light
                        groundNdotL;      // Ground bounce
+    
+    // Debug mode: show material colors instead of textures
+    if (debugMaterialColors) {
+        vec3 matColor = hashMaterialColor(debugMaterialIndex);
+        vec3 result = matColor * totalLight;
+        result = pow(result, vec3(1.0/2.2));
+        FragColor = vec4(result, 1.0);
+        return;
+    }
     
     vec3 color = objectColor;
     if (useTexture) {

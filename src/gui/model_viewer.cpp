@@ -58,19 +58,18 @@ static bool parse_color_value(const std::string& content, const std::string& col
     // Skip whitespace
     while (pos < content.length() && (content[pos] == ' ' || content[pos] == '\t')) pos++;
     
-    // Parse 4 floats
-    std::string value_str;
-    size_t end_pos = pos;
-    while (end_pos < content.length() && end_pos < pos + 100 &&
-           content[end_pos] != '\n' && content[end_pos] != '\r' && 
-           content[end_pos] != '.' && content[end_pos] != '{') {
-        end_pos++;
-    }
-    // Back up to get the full numbers line
-    end_pos = content.find('\n', pos);
+    // Find end of line (look for newline, carriage return, or opening brace for next property)
+    size_t end_pos = content.find('\n', pos);
     if (end_pos == std::string::npos) end_pos = content.length();
     
-    value_str = content.substr(pos, end_pos - pos);
+    // Also check for carriage return
+    size_t cr_pos = content.find('\r', pos);
+    if (cr_pos != std::string::npos && cr_pos < end_pos) end_pos = cr_pos;
+    
+    // Also stop at '..' which indicates newline in our logging (but don't stop at decimal points)
+    // We need to be careful not to stop at decimal points in floats
+    
+    std::string value_str = content.substr(pos, end_pos - pos);
     
     std::istringstream iss(value_str);
     float r, g, b, a;
@@ -297,10 +296,20 @@ static MaterialInfo parse_emat_material(const std::vector<uint8_t>& data,
                       return a.priority < b.priority;
                   });
         
-        // Only use if priority is reasonable (not just overlay textures)
+        // Use best candidate - for MCR-only materials, overlay BCR is still useful
+        // Prioritize non-overlay (< 500), but use overlay if nothing better available
         if (diffuse_candidates[0].priority < 500) {
             info.textures["Diffuse"] = diffuse_candidates[0].path;
             LOG_INFO("EmatParser", "Selected diffuse BCR: " << diffuse_candidates[0].path 
+                      << " (priority=" << diffuse_candidates[0].priority << ")");
+        } else if (info.is_mcr_material) {
+            // For MCR materials, use the MCR texture as visual reference if no BCR
+            // The shader will use base color from Color_3 parameter
+            LOG_INFO("EmatParser", "MCR material - using base color, no BCR texture");
+        } else {
+            // No good BCR, but we have overlay candidates - use best one as fallback
+            info.textures["Diffuse"] = diffuse_candidates[0].path;
+            LOG_INFO("EmatParser", "Using fallback diffuse BCR: " << diffuse_candidates[0].path 
                       << " (priority=" << diffuse_candidates[0].priority << ")");
         }
     }
@@ -814,6 +823,7 @@ void ModelViewer::render() {
 
             renderer_->set_wireframe(show_wireframe_);
             renderer_->set_show_grid(show_grid_);
+            renderer_->set_debug_material_colors(show_material_debug_);
 
             camera_->set_aspect(static_cast<float>(view_width) / static_cast<float>(view_height));
             glm::mat4 view = camera_->view_matrix();
@@ -826,7 +836,7 @@ void ModelViewer::render() {
         if (fb_texture_ != 0) {
             ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(fb_texture_)),
                          ImVec2(static_cast<float>(view_width), static_cast<float>(view_height)),
-                         ImVec2(0, 1), ImVec2(1, 0));
+                         ImVec2(0, 1), ImVec2(1, 0), ImVec4(1, 1, 1, 1), ImVec4(0, 0, 0, 0));
 
             if (ImGui::IsItemHovered()) {
                 auto& io = ImGui::GetIO();
@@ -866,6 +876,8 @@ void ModelViewer::render_toolbar() {
     ImGui::Checkbox("Wireframe", &show_wireframe_);
     ImGui::SameLine();
     ImGui::Checkbox("Grid", &show_grid_);
+    ImGui::SameLine();
+    ImGui::Checkbox("Mat Debug", &show_material_debug_);
     ImGui::SameLine();
     ImGui::ColorEdit3("BG", &bg_color_.x, ImGuiColorEditFlags_NoInputs);
     ImGui::SameLine();

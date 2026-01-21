@@ -278,6 +278,21 @@ void FileBrowser::render_tree_node(const TreeNode& node) {
             }
         }
 
+        // Context menu for tree view files
+        if (node.entry) {
+            if (ImGui::BeginPopupContextItem()) {
+                if (ImGui::MenuItem("Export...")) {
+                    if (on_export_requested) {
+                        on_export_requested(node.entry->path);
+                    }
+                }
+                if (ImGui::MenuItem("Copy Path")) {
+                    ImGui::SetClipboardText(node.entry->path.c_str());
+                }
+                ImGui::EndPopup();
+            }
+        }
+
         // Tooltip with size
         if (ImGui::IsItemHovered() && node.entry) {
             ImGui::BeginTooltip();
@@ -315,7 +330,9 @@ void FileBrowser::render_flat_list() {
         // Context menu
         if (ImGui::BeginPopupContextItem()) {
             if (ImGui::MenuItem("Export...")) {
-                // TODO: Export dialog
+                if (on_export_requested) {
+                    on_export_requested(entry->path);
+                }
             }
             if (ImGui::MenuItem("Copy Path")) {
                 ImGui::SetClipboardText(entry->path.c_str());

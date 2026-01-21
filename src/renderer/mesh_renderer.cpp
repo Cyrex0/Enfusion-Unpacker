@@ -217,6 +217,7 @@ void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projectio
     
     // Determine if we should use per-material rendering
     bool use_material_ranges = false;
+    
     if (mesh_ && !mesh_->material_ranges.empty()) {
         // Calculate total triangles covered by ranges
         uint32_t covered_triangles = 0;
@@ -226,7 +227,28 @@ void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projectio
         uint32_t total_triangles = static_cast<uint32_t>(index_count_ / 3);
         // Use per-material rendering if ranges cover at least 50% of triangles
         use_material_ranges = (covered_triangles >= total_triangles / 2);
+        
+        // Log once per mesh
+        static std::shared_ptr<const XobMesh> last_logged_mesh = nullptr;
+        if (mesh_ != last_logged_mesh) {
+            last_logged_mesh = mesh_;
+            LOG_INFO("Renderer", "Material ranges: " << mesh_->material_ranges.size() 
+                      << " ranges covering " << covered_triangles << "/" << total_triangles << " triangles"
+                      << ", use_material_ranges=" << use_material_ranges
+                      << ", material_textures=" << material_textures_.size());
+            for (size_t i = 0; i < mesh_->material_ranges.size(); i++) {
+                const auto& r = mesh_->material_ranges[i];
+                auto tex_it = material_textures_.find(r.material_index);
+                uint32_t tex = (tex_it != material_textures_.end()) ? tex_it->second.diffuse : 0;
+                LOG_DEBUG("Renderer", "  Range[" << i << "]: mat=" << r.material_index 
+                          << " tris=" << r.triangle_start << "-" << r.triangle_end 
+                          << " tex=" << tex);
+            }
+        }
     }
+    
+    // Set debug uniforms
+    mesh_shader_->set_bool("debugMaterialColors", debug_material_colors_);
     
     if (use_material_ranges) {
         // Track which triangles have been rendered
@@ -240,6 +262,9 @@ void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projectio
             if (it != material_textures_.end() && !it->second.enabled) {
                 continue; // Skip disabled materials
             }
+            
+            // Set debug material index for coloring
+            mesh_shader_->set_int("debugMaterialIndex", static_cast<int>(range.material_index));
             
             // Set object color based on whether this material is highlighted
             if (highlighted_material_ >= 0 && range.material_index != static_cast<uint32_t>(highlighted_material_)) {
@@ -284,6 +309,20 @@ void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projectio
             }
             
             // Draw this material's triangles
+            // Debug log on first Mat Debug frame after mesh change
+            static std::shared_ptr<const XobMesh> last_debug_mesh = nullptr;
+            if (debug_material_colors_ && mesh_ != last_debug_mesh) {
+                if (range.material_index == 0 || last_debug_mesh != mesh_) {
+                    LOG_DEBUG("Renderer", "Drawing mat " << range.material_index 
+                              << " at index_start=" << range.index_start() 
+                              << " index_count=" << range.index_count()
+                              << " (triangles " << range.triangle_start << "-" << range.triangle_end << ")");
+                }
+                if (range.material_index == mesh_->materials.size() - 1) {
+                    last_debug_mesh = mesh_; // Mark this mesh as logged
+                }
+            }
+            
             glDrawElements(GL_TRIANGLES, 
                           static_cast<GLsizei>(range.index_count()),
                           GL_UNSIGNED_INT,

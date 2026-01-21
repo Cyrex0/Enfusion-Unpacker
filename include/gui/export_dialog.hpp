@@ -17,6 +17,16 @@ namespace enfusion {
 class AddonExtractor;
 
 /**
+ * Info about an addon for batch export selection
+ */
+struct BatchAddonInfo {
+    std::string name;
+    std::filesystem::path path;
+    size_t total_size = 0;
+    bool selected = false;
+};
+
+/**
  * Dialog for exporting files from addon.
  */
 class ExportDialog {
@@ -26,28 +36,52 @@ public:
 
     void render(bool* open);
 
-    void set_source(const std::filesystem::path& path, bool batch = false) {
+    // Set single addon source for "Export Selected" (exports entire mod pack)
+    void set_source(const std::filesystem::path& path) {
         source_path_ = path;
-        batch_mode_ = batch;
-        selected_file_.clear();  // Clear selected file when source changes
+        batch_mode_ = false;
+        selected_file_.clear();
     }
     
-    void set_selected_file(const std::string& file) {
-        selected_file_ = file;
+    // Set batch mode with list of available addons for selection
+    void set_batch_mode(const std::vector<AddonInfo>& available_addons) {
+        batch_mode_ = true;
+        source_path_.clear();
+        selected_file_.clear();
+        
+        // Convert to batch addon info with selection state
+        batch_addons_.clear();
+        for (const auto& addon : available_addons) {
+            BatchAddonInfo info;
+            info.name = addon.name;
+            info.path = addon.path;
+            info.total_size = addon.total_size;
+            info.selected = false;  // Start unselected
+            batch_addons_.push_back(info);
+        }
     }
-
-    void set_batch_mode(bool batch) { batch_mode_ = batch; }
+    
+    // Initialize with default export path from settings
+    void init_from_settings();
 
 private:
-    void render_content();
+    void render_content(bool* open);
+    void render_addon_selection();
     void render_progress();
     void start_export();
     void browse_output_folder();
+    std::string format_size(size_t bytes) const;
+    
+    bool* dialog_open_ = nullptr;  // Pointer to the open flag
 
     // Source
-    std::filesystem::path source_path_;
-    std::string selected_file_;  // For single file export
+    std::filesystem::path source_path_;  // For single addon export
+    std::string selected_file_;  // Deprecated - kept for compatibility
     bool batch_mode_ = false;
+    
+    // Batch mode addon selection
+    std::vector<BatchAddonInfo> batch_addons_;
+    char addon_search_[256] = {};
 
     // Export options
     std::filesystem::path output_path_;
@@ -71,8 +105,11 @@ private:
     bool exporting_ = false;
     float progress_ = 0.0f;
     std::string current_file_;
+    std::string current_addon_;
     int files_processed_ = 0;
     int total_files_ = 0;
+    int addons_processed_ = 0;
+    int total_addons_ = 0;
 
     std::atomic<bool> cancel_requested_{false};
     std::atomic<bool> export_finished_{false};

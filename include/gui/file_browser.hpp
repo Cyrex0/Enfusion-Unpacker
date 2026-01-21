@@ -65,6 +65,7 @@ public:
     using FileSelectCallback = std::function<void(const std::string&)>;
 
     std::function<void(const std::string&)> on_file_selected;
+    std::function<void(const std::string&)> on_export_requested;  // Called when user requests export from context menu
 
     FileBrowser() = default;
     ~FileBrowser() = default;

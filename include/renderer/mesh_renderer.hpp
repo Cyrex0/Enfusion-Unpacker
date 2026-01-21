@@ -49,6 +49,7 @@ public:
     void set_show_grid(bool enable) { show_grid_ = enable; }
     void set_current_lod(int lod) { current_lod_ = lod; }
     void set_highlight_material(int index) { highlighted_material_ = index; }
+    void set_debug_material_colors(bool enable) { debug_material_colors_ = enable; }
 
     // Render option getters
     bool wireframe() const { return wireframe_; }
@@ -56,6 +57,7 @@ public:
     bool show_grid() const { return show_grid_; }
     int current_lod() const { return current_lod_; }
     float grid_size() const { return grid_size_; }
+    bool debug_material_colors() const { return debug_material_colors_; }
     
     // Material access
     const std::map<size_t, MaterialTextures>& material_textures() const { return material_textures_; }
@@ -94,6 +96,7 @@ private:
     bool show_normals_ = false;
     bool wireframe_ = false;
     bool frustum_cull_ = true;  // Enable frustum culling by default
+    bool debug_material_colors_ = false;  // Debug: show material colors instead of textures
     float grid_size_ = 10.0f;
     int current_lod_ = 0;
     int highlighted_material_ = -1;  // -1 = none

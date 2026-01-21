@@ -103,6 +103,7 @@ private:
     bool show_wireframe_ = false;
     bool show_normals_ = false;
     bool show_grid_ = true;
+    bool show_material_debug_ = false;  // Debug: show material colors instead of textures
     int current_lod_ = 0;
     glm::vec3 bg_color_{0.15f, 0.15f, 0.18f};
 
