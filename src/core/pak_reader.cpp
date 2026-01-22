@@ -83,10 +83,6 @@ bool PakReader::open(const std::filesystem::path& path) {
         LOG_ERROR("PakReader", "Exception while parsing: " << e.what());
         close();
         return false;
-    } catch (...) {
-        LOG_ERROR("PakReader", "Unknown exception while parsing PAK file");
-        close();
-        return false;
     }
     
     LOG_INFO("PakReader", "Opened: " << path.filename().string() 
@@ -316,9 +312,6 @@ std::vector<uint8_t> PakReader::read_file(const PakEntry& entry) {
             // Add other compression types here if discovered
         } catch (const std::exception& e) {
             LOG_ERROR("PakReader", "Decompression failed for: " << entry.path << " - " << e.what());
-            return {};
-        } catch (...) {
-            LOG_ERROR("PakReader", "Decompression failed (unknown exception) for: " << entry.path);
             return {};
         }
     }

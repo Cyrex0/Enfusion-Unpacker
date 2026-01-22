@@ -1,5 +1,7 @@
 /**
  * Enfusion Unpacker - XOB Parser
+ * 
+ * Parses XOB9 format mesh files from Enfusion engine (Arma Reforger).
  */
 
 #pragma once
@@ -25,12 +27,6 @@ public:
     
 private:
     std::optional<std::span<const uint8_t>> find_chunk(const uint8_t* chunk_id) const;
-    std::vector<LzoDescriptor> parse_descriptors(std::span<const uint8_t> head_data);
-    std::vector<XobMaterial> parse_materials(std::span<const uint8_t> head_data);
-    std::vector<MaterialRange> parse_material_ranges(std::span<const uint8_t> head_data, uint32_t triangle_count);
-    std::span<const uint8_t> extract_lod_region(std::span<const uint8_t> decompressed, uint32_t lod);
-    std::optional<XobMesh> parse_mesh_region(std::span<const uint8_t> region, const LzoDescriptor& desc);
-    void calculate_bounds(XobMesh& mesh);
     
     std::span<const uint8_t> data_;
     std::vector<LzoDescriptor> descriptors_;

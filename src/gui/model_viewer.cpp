@@ -1317,7 +1317,7 @@ void ModelViewer::filter_textures() {
 
 void ModelViewer::apply_texture(const std::string& path) {
     if (!texture_loader_) {
-        std::cerr << "[ModelViewer] No texture loader\n";
+        LOG_ERROR("ModelViewer", "No texture loader");
         return;
     }
     
@@ -1442,15 +1442,15 @@ void ModelViewer::render_texture_browser() {
 
 void ModelViewer::apply_texture_to_material(size_t material_index, const std::string& path) {
     if (!texture_loader_) {
-        std::cerr << "[ModelViewer] No texture loader\n";
+        LOG_ERROR("ModelViewer", "No texture loader");
         return;
     }
     
-    std::cerr << "[ModelViewer] Applying texture to material " << material_index << ": " << path << "\n";
+    LOG_DEBUG("ModelViewer", "Applying texture to material " << material_index << ": " << path);
     
     auto data = texture_loader_(path);
     if (data.empty()) {
-        std::cerr << "[ModelViewer] Failed to load texture data\n";
+        LOG_WARNING("ModelViewer", "Failed to load texture data: " << path);
         return;
     }
     
@@ -1458,14 +1458,14 @@ void ModelViewer::apply_texture_to_material(size_t material_index, const std::st
     EddsConverter converter(std::span<const uint8_t>(data.data(), data.size()));
     auto dds_data = converter.convert();
     if (dds_data.empty()) {
-        std::cerr << "[ModelViewer] EDDS conversion failed\n";
+        LOG_WARNING("ModelViewer", "EDDS conversion failed: " << path);
         return;
     }
     
     // Load DDS
     auto texture = DdsLoader::load(std::span<const uint8_t>(dds_data.data(), dds_data.size()));
     if (!texture || texture->pixels.empty()) {
-        std::cerr << "[ModelViewer] DDS loading failed\n";
+        LOG_WARNING("ModelViewer", "DDS loading failed: " << path);
         return;
     }
     
@@ -1496,8 +1496,8 @@ void ModelViewer::apply_texture_to_material(size_t material_index, const std::st
     material_diffuse_textures_[material_index] = tex_id;
     renderer_->set_material_texture(material_index, tex_id, is_mcr);
     
-    std::cerr << "[ModelViewer] Material " << material_index << " texture applied: " 
-              << texture->width << "x" << texture->height << " (MCR=" << is_mcr << ")\n";
+    LOG_DEBUG("ModelViewer", "Material " << material_index << " texture applied: " 
+              << texture->width << "x" << texture->height << " MCR=" << is_mcr);
 }
 
 bool ModelViewer::try_load_texture_data(size_t material_index, const std::vector<uint8_t>& data, const std::string& path) {

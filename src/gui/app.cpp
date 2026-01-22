@@ -7,6 +7,7 @@
 #include "gui/theme.hpp"
 #include "enfusion/pak_manager.hpp"
 #include "enfusion/pak_index.hpp"
+#include "enfusion/logging.hpp"
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -164,8 +165,8 @@ void App::load_settings() {
             if (j.contains("convert_textures_to_png")) settings_.convert_textures_to_png = j["convert_textures_to_png"].get<bool>();
             if (j.contains("convert_meshes_to_obj")) settings_.convert_meshes_to_obj = j["convert_meshes_to_obj"].get<bool>();
         }
-    } catch (...) {
-        // Use defaults
+    } catch (const std::exception& e) {
+        LOG_WARNING("App", "Failed to load settings: " << e.what() << " - using defaults");
     }
     
     // Initialize PakManager with paths
@@ -208,8 +209,8 @@ void App::save_settings() {
         
         std::ofstream file("settings.json");
         file << j.dump(2);
-    } catch (...) {
-        // Ignore
+    } catch (const std::exception& e) {
+        LOG_ERROR("App", "Failed to save settings: " << e.what());
     }
 }
 

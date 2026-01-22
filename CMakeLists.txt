@@ -55,6 +55,9 @@ set(CORE_SOURCES
 # Source files - Formats
 set(FORMAT_SOURCES
     src/formats/xob_parser.cpp
+    src/formats/xob_vertex_layout.cpp
+    src/formats/xob_vertex_parser.cpp
+    src/formats/xob_material_ranges.cpp
     src/formats/edds_converter.cpp
     src/formats/dds_loader.cpp
 )

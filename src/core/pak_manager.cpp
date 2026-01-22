@@ -3,6 +3,8 @@
  */
 
 #include "enfusion/pak_manager.hpp"
+#include "enfusion/path_utils.hpp"
+#include "enfusion/texture_utils.hpp"
 #include "enfusion/logging.hpp"
 #include <algorithm>
 #include <iostream>
@@ -81,14 +83,14 @@ void PakManager::unload_pak(const std::filesystem::path& pak_path) {
         pak_index_[paks_[i]->path.string()] = i;
     }
     
-    std::cerr << "[PakManager] Unloaded: " << pak_path.filename().string() << "\n";
+    LOG_INFO("PakManager", "Unloaded: " << pak_path.filename().string());
 }
 
 void PakManager::unload_all() {
     std::lock_guard<std::mutex> lock(mutex_);
     paks_.clear();
     pak_index_.clear();
-    std::cerr << "[PakManager] Unloaded all PAKs" << "\n";
+    LOG_INFO("PakManager", "Unloaded all PAKs");
 }
 
 bool PakManager::is_loaded(const std::filesystem::path& pak_path) const {
@@ -108,19 +110,14 @@ std::vector<std::filesystem::path> PakManager::loaded_paks() const {
 std::vector<uint8_t> PakManager::read_file(const std::string& virtual_path) {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    // Normalize path separators
-    std::string normalized = virtual_path;
-    std::replace(normalized.begin(), normalized.end(), '\\', '/');
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
+    std::string normalized = normalize_path(virtual_path);
     
     LOG_DEBUG("PakManager", "Reading file: " << normalized);
     
     // Search all loaded PAKs
     for (const auto& pak : paks_) {
         for (const auto& file : pak->file_list) {
-            std::string file_normalized = file;
-            std::replace(file_normalized.begin(), file_normalized.end(), '\\', '/');
-            std::transform(file_normalized.begin(), file_normalized.end(), file_normalized.begin(), ::tolower);
+            std::string file_normalized = normalize_path(file);
             if (file_normalized == normalized) {
                 // Read using the stored path to avoid case mismatches
                 auto data = pak->extractor->read_file(file);
@@ -143,16 +140,11 @@ std::vector<uint8_t> PakManager::read_file(const std::string& virtual_path) {
 bool PakManager::file_exists(const std::string& virtual_path) const {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    std::string normalized = virtual_path;
-    std::replace(normalized.begin(), normalized.end(), '\\', '/');
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
+    std::string normalized = normalize_path(virtual_path);
     
     for (const auto& pak : paks_) {
         for (const auto& file : pak->file_list) {
-            std::string file_normalized = file;
-            std::replace(file_normalized.begin(), file_normalized.end(), '\\', '/');
-            std::transform(file_normalized.begin(), file_normalized.end(), file_normalized.begin(), ::tolower);
-            if (file_normalized == normalized) {
+            if (normalize_path(file) == normalized) {
                 return true;
             }
         }
@@ -164,16 +156,11 @@ bool PakManager::file_exists(const std::string& virtual_path) const {
 std::string PakManager::find_file_pak(const std::string& virtual_path) const {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    std::string normalized = virtual_path;
-    std::replace(normalized.begin(), normalized.end(), '\\', '/');
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
+    std::string normalized = normalize_path(virtual_path);
     
     for (const auto& pak : paks_) {
         for (const auto& file : pak->file_list) {
-            std::string file_normalized = file;
-            std::replace(file_normalized.begin(), file_normalized.end(), '\\', '/');
-            std::transform(file_normalized.begin(), file_normalized.end(), file_normalized.begin(), ::tolower);
-            if (file_normalized == normalized) {
+            if (normalize_path(file) == normalized) {
                 return pak->path.string();
             }
         }
@@ -184,27 +171,10 @@ std::string PakManager::find_file_pak(const std::string& virtual_path) const {
 
 std::vector<uint8_t> PakManager::find_texture(const std::string& material_name,
                                                const std::string& base_path) {
-    // Try various texture naming conventions
-    std::vector<std::string> suffixes = {
-        "_BCR.edds", "_MCR.edds", "_co.edds", ".edds",
-        "_BCR.dds", "_MCR.dds", "_co.dds", ".dds"
-    };
+    std::string dir = get_parent_path(base_path);
+    auto paths = get_color_texture_paths(material_name, dir);
     
-    // Extract directory from base_path
-    std::filesystem::path base(base_path);
-    std::string dir = base.parent_path().string();
-    if (!dir.empty() && dir.back() != '/') dir += '/';
-    
-    // Try Textures subfolder first
-    for (const auto& suffix : suffixes) {
-        std::string tex_path = dir + "Textures/" + material_name + suffix;
-        auto data = read_file(tex_path);
-        if (!data.empty()) return data;
-    }
-    
-    // Try same folder
-    for (const auto& suffix : suffixes) {
-        std::string tex_path = dir + material_name + suffix;
+    for (const auto& tex_path : paths) {
         auto data = read_file(tex_path);
         if (!data.empty()) return data;
     }
@@ -213,8 +183,8 @@ std::vector<uint8_t> PakManager::find_texture(const std::string& material_name,
     if (material_name.find("chrome") != std::string::npos ||
         material_name.find("glass") != std::string::npos ||
         material_name.find("mirror") != std::string::npos) {
-        for (const auto& suffix : suffixes) {
-            std::string tex_path = "Common/Materials/Textures/" + material_name + suffix;
+        auto common_paths = get_color_texture_paths(material_name, "Common/Materials");
+        for (const auto& tex_path : common_paths) {
             auto data = read_file(tex_path);
             if (!data.empty()) return data;
         }
@@ -409,7 +379,7 @@ void PakManager::scan_game_folder(const std::filesystem::path& game_path) {
         addons_path = game_path;  // Maybe user pointed directly to Addons
     }
     
-    std::cerr << "[PakManager] Scanning: " << addons_path.string() << "\n";
+    LOG_DEBUG("PakManager", "Scanning: " << addons_path.string());
     
     // Find all PAK files
     try {
@@ -423,7 +393,7 @@ void PakManager::scan_game_folder(const std::filesystem::path& game_path) {
             }
         }
     } catch (const std::exception& e) {
-        std::cerr << "[PakManager] Scan error: " << e.what() << "\n";
+        LOG_ERROR("PakManager", "Scan error: " << e.what());
     }
 }
 
@@ -456,13 +426,13 @@ void PakManager::load_common_paks() {
 void PakManager::set_game_path(const std::filesystem::path& game_path) {
     std::lock_guard<std::mutex> lock(mutex_);
     game_folder_ = game_path;
-    std::cerr << "[PakManager] Game path set: " << game_path.string() << "\n";
+    LOG_INFO("PakManager", "Game path set: " << game_path.string());
 }
 
 void PakManager::set_mods_path(const std::filesystem::path& mods_path) {
     std::lock_guard<std::mutex> lock(mutex_);
     mods_folder_ = mods_path;
-    std::cerr << "[PakManager] Mods path set: " << mods_path.string() << "\n";
+    LOG_INFO("PakManager", "Mods path set: " << mods_path.string());
 }
 
 void PakManager::scan_directory_for_paks(const std::filesystem::path& dir) {
@@ -485,8 +455,7 @@ void PakManager::scan_directory_for_paks(const std::filesystem::path& dir) {
             }
         }
     } catch (const std::exception& e) {
-        std::cerr << "[PakManager] Error scanning " << dir.string() 
-                  << ": " << e.what() << "\n";
+        LOG_ERROR("PakManager", "Error scanning " << dir.string() << ": " << e.what());
     }
 }
 
@@ -509,8 +478,7 @@ void PakManager::scan_available_paks() {
         scan_directory_for_paks(mods_folder_);
     }
     
-    std::cerr << "[PakManager] Found " << available_paks_.size() 
-              << " available PAKs\n";
+    LOG_INFO("PakManager", "Found " << available_paks_.size() << " available PAKs");
 }
 
 void PakManager::initialize_index(IndexProgressCallback callback) {
@@ -523,8 +491,8 @@ void PakManager::initialize_index(IndexProgressCallback callback) {
     // Open database and build/update index
     if (index.open_database()) {
         index.build_index(callback);
-        std::cerr << "[PakManager] Index ready: " << index.total_files() << " files in " 
-                  << index.total_paks() << " PAKs\n";
+        LOG_INFO("PakManager", "Index ready: " << index.total_files() << " files in " 
+                  << index.total_paks() << " PAKs");
     }
 }
 

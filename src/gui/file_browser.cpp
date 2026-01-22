@@ -6,6 +6,7 @@
 #include "gui/widgets.hpp"
 #include "enfusion/addon_extractor.hpp"
 #include "enfusion/pak_manager.hpp"
+#include "enfusion/logging.hpp"
 
 #include <imgui.h>
 #include <algorithm>
@@ -84,7 +85,8 @@ void FileBrowser::load_from_addon(const std::filesystem::path& addon_dir) {
 
             entries_.push_back(fe);
         }
-    } catch (...) {
+    } catch (const std::exception& e) {
+        LOG_ERROR("FileBrowser", "Failed to load PAK: " << e.what());
         extractor_.reset();
     }
 }
@@ -122,8 +124,8 @@ void FileBrowser::load_from_directory(const std::filesystem::path& dir_path) {
                 entries_.push_back(fe);
             }
         }
-    } catch (...) {
-        // Handle error
+    } catch (const std::exception& e) {
+        LOG_ERROR("FileBrowser", "Failed to load directory: " << e.what());
     }
 }
 
