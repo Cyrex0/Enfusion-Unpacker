@@ -2,7 +2,8 @@
 
 A powerful tool for viewing and extracting assets from Arma Reforger PAK files, including 3D models (XOB), textures (EDDS), and other game assets.
 
-![Enfusion Unpacker Screenshot](https://github.com/user-attachments/assets/7a5a097f-461e-47c4-9158-78086b306d61)
+![Enfusion Unpacker Screenshot]<img width="2542" height="1430" alt="image" src="https://github.com/user-attachments/assets/69208197-4b51-4d95-b982-fb535c03b137" />
+
 
 ## Features
 
