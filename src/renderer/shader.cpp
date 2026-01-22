@@ -256,16 +256,20 @@ void main() {
             float cavity = texColor.g;  // AO/cavity for detail
             float roughness = texColor.b;
             
-            // Use base color from emat if available, otherwise neutral gray
+            // Use base color from emat if available, otherwise derive a grayscale
+            // signal from MCR to avoid flat-color previews.
             vec3 surfaceColor = hasBaseColor ? baseColor : vec3(0.5, 0.5, 0.5);
+            vec3 mcrGray = vec3(metallic * 0.4 + cavity * 0.4 + (1.0 - roughness) * 0.2);
+            if (!hasBaseColor) {
+                surfaceColor = mcrGray;
+            }
             
-            // Subtle cavity darkening (only in crevices, don't overdo it)
-            float cavityMult = mix(0.7, 1.0, cavity);
+            // Stronger cavity/roughness modulation to reveal detail in preview
+            float cavityMult = mix(0.4, 1.2, cavity);
+            float roughMult = mix(1.15, 0.7, roughness);
+            float metallicBoost = mix(1.0, 1.2, metallic);
             
-            // Metallic surfaces are slightly more reflective looking
-            float metallicBoost = mix(1.0, 1.1, metallic);
-            
-            color = surfaceColor * cavityMult * metallicBoost;
+            color = surfaceColor * cavityMult * roughMult * metallicBoost;
             
         } else {
             // BCR/standard diffuse texture: RGB = base color

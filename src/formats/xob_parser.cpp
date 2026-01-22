@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <iostream>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <cfloat>
@@ -32,46 +33,59 @@
 namespace enfusion {
 
 // ============================================================================
-// XOB Format Constants
+// XOB9 Format Constants (per XOB9_FORMAT_SPEC_v8.md)
 // ============================================================================
 
 // LZ4 block decompression parameters
 constexpr size_t LZ4_MAX_BLOCK_SIZE = 0x20000;       // 128KB maximum compressed block
 constexpr size_t LZ4_DICT_SIZE = 65536;              // 64KB dictionary window
 
-// LZO4 Descriptor offsets (from "LZO4" marker)
-// See xob_to_obj.py parse_lzo4_descriptors()
+// LZO4 Descriptor layout (116 bytes, offsets from "LZO4" marker)
+// Per spec v8 section 2.3
 constexpr size_t LZO4_MARKER_SIZE = 4;                // "LZO4" magic (4 bytes)
 constexpr size_t LZO4_DESCRIPTOR_SIZE = 116;          // Total descriptor size in bytes
-constexpr size_t LZO4_DECOMP_SIZE_OFFSET = 28;        // Decompressed size (uint32_t)
-constexpr size_t LZO4_FORMAT_FLAGS_OFFSET = 32;       // Format flags (uint32_t)
-constexpr size_t LZO4_TRIANGLE_COUNT_OFFSET = 76;     // Triangle count (uint16_t)
-constexpr size_t LZO4_VERTEX_COUNT_OFFSET = 78;       // Vertex count (uint16_t)
-constexpr size_t LZO4_MIN_REQUIRED_BYTES = 80;        // Minimum bytes needed from marker
 
-// Format flag bit masks (applied to low byte of format_flags)
-constexpr uint8_t XOB_FLAG_NORMALS = 0x02;           // Has normal vectors
-constexpr uint8_t XOB_FLAG_UVS = 0x04;               // Has UV coordinates
-constexpr uint8_t XOB_FLAG_TANGENTS = 0x08;          // Has tangent vectors
-constexpr uint8_t XOB_FLAG_SKINNING = 0x10;          // Has bone weights/indices
-constexpr uint8_t XOB_FLAG_EXTRA_NORMALS = 0x20;     // Has additional normal data
+// LZO4 Descriptor field offsets (all from "LZO4" marker position)
+constexpr size_t LZO4_OFF_QUALITY_TIER = 0x04;        // +0x04: u32 LOD quality (1-5)
+constexpr size_t LZO4_OFF_SWITCH_DIST = 0x0C;         // +0x0C: f32 LOD switch distance
+constexpr size_t LZO4_OFF_COMPRESSED = 0x14;          // +0x14: u32 Compressed size in LODS
+constexpr size_t LZO4_OFF_DECOMPRESSED = 0x1C;        // +0x1C: u32 Decompressed size
+constexpr size_t LZO4_OFF_FORMAT_FLAGS = 0x20;        // +0x20: u32 Format flags
+constexpr size_t LZO4_OFF_BBOX_MIN = 0x24;            // +0x24: f32[3] LOD bbox min
+constexpr size_t LZO4_OFF_BBOX_MAX = 0x30;            // +0x30: f32[3] LOD bbox max
+constexpr size_t LZO4_OFF_TRIANGLE_COUNT = 0x4C;      // +0x4C: u16 Triangle count
+constexpr size_t LZO4_OFF_UNIQUE_VERTS = 0x4E;        // +0x4E: u16 Unique vertex count
+constexpr size_t LZO4_OFF_ORIG_VERTS = 0x50;          // +0x50: u16 Original vertex count
+constexpr size_t LZO4_OFF_SUBMESH_IDX = 0x52;         // +0x52: u16 Submesh/material index
+constexpr size_t LZO4_OFF_ATTR_CONFIG = 0x58;         // +0x58: u8[8] Attribute configuration
+constexpr size_t LZO4_OFF_UV_BOUNDS = 0x60;           // +0x60: f32[4] UV bounds (umin,umax,vmin,vmax)
+constexpr size_t LZO4_OFF_SURFACE_SCALE = 0x70;       // +0x70: f32 Surface scale factor
+constexpr size_t LZO4_MIN_REQUIRED_BYTES = 0x74;      // Minimum bytes needed (116 bytes)
 
-// Position stride determination (bit 4 of upper byte of format_flags)
-// Upper byte pattern: 0x0F, 0x2F, 0x8F, 0xAF → 12-byte stride (XYZ only)
-// Upper byte pattern: 0x1F, 0x3F, 0x9F, 0xBF → 16-byte stride (XYZW, W=0)
-constexpr uint8_t XOB_STRIDE_16_BIT = 0x10;           // Bit that indicates 16-byte stride
+// Mesh type from high byte of format_flags (per spec v8 section 3.1)
+constexpr uint8_t XOB_MESH_STATIC = 0x0F;             // Standard mesh with normals
+constexpr uint8_t XOB_MESH_SKINNED = 0x1F;            // Has bone weights/indices
+constexpr uint8_t XOB_MESH_EMISSIVE = 0x8F;           // Has second UV set for emissive
+constexpr uint8_t XOB_MESH_SKINNED_EMISSIVE = 0x9F;   // Combined skinned + emissive
+
+// Position stride: bit 4 of mesh_type determines stride
+// 0x0F, 0x8F = 12-byte (XYZ), 0x1F, 0x9F = 16-byte (XYZW)
 constexpr int XOB_POSITION_STRIDE_12 = 12;            // XYZ floats (3 * 4 bytes)
 constexpr int XOB_POSITION_STRIDE_16 = 16;            // XYZW floats (4 * 4 bytes, W unused)
 
-// Vertex attribute sizes in bytes
-constexpr size_t XOB_NORMAL_SIZE = 4;                 // Compressed normal (4 bytes)
-constexpr size_t XOB_UV_SIZE = 4;                     // Half-float UV (4 bytes)
-constexpr size_t XOB_TANGENT_SIZE = 4;                // Compressed tangent (4 bytes)
-constexpr size_t XOB_EXTRA_SIZE = 8;                  // Extra data (8 bytes)
-
-// Index buffer
+// Vertex attribute sizes (per spec v8 section 4.3)
 constexpr size_t XOB_INDEX_SIZE = 2;                  // 16-bit indices
-constexpr size_t XOB_INDEX_ARRAYS = 2;                // Two index arrays before positions
+constexpr size_t XOB_NORMAL_SIZE = 4;                 // Packed normal (u8[4])
+constexpr size_t XOB_TANGENT_SIZE = 4;                // Packed tangent (u8[4])
+constexpr size_t XOB_UV_SIZE_HALF = 4;                // f16[2] half-float UV pair
+constexpr size_t XOB_VERTEX_COLOR_SIZE = 4;           // u8[4] RGBA vertex color
+constexpr size_t XOB_EXTRA_SIZE = 8;                  // Extra data (second UV set + color)
+
+// Attribute config byte meanings (per spec v8 section 2.7)
+constexpr size_t ATTR_CFG_LOD_FLAG = 0;               // [0] LOD-specific flag
+constexpr size_t ATTR_CFG_UV_SETS = 2;                // [2] UV set count (1 or 2)
+constexpr size_t ATTR_CFG_MAT_SLOTS = 3;              // [3] Material/texture slots
+constexpr size_t ATTR_CFG_BONE_STREAMS = 4;           // [4] Bone weight streams (0, 1, or 2)
 
 // Helper to read big-endian uint32 (IFF chunk sizes)
 static inline uint32_t read_u32_be(const uint8_t* p) {
@@ -103,8 +117,8 @@ static inline float read_f32_le(const uint8_t* p) {
  * Convert IEEE 754 half-precision (16-bit) float to single-precision (32-bit) float
  * Layout: 1 sign bit, 5 exponent bits, 10 mantissa bits
  * 
- * IMPORTANT: XOB UV coordinates appear to use half-float format.
- * This function handles all cases including denormalized numbers properly.
+ * Per XOB9_FORMAT_SPEC_v8.md: UV coordinates use f16 half-floats, not normalized u16.
+ * This is used for UV decoding in parse_mesh_from_region.
  */
 static inline float half_to_float(uint16_t h) {
     // Use a union for type-safe bit manipulation
@@ -223,36 +237,15 @@ static std::vector<uint8_t> decompress_lz4_chained(const uint8_t* data, size_t s
 }
 
 /**
- * LZO4 Descriptor structure (116 bytes each)
- * Based on Python parse_lzo4_descriptors()
+ * Parse LZO4 descriptors from HEAD chunk.
+ * Per XOB9_FORMAT_SPEC_v8.md section 2.3 (116 bytes per descriptor)
  * 
- * IMPORTANT: LZO4 Descriptor layout (all offsets from "LZO4" marker):
- * - +0:   "LZO4" magic (4 bytes)
- * - +28:  Decompressed size (4 bytes) 
- * - +32:  Format flags (4 bytes) - upper byte bit 4 determines position stride
- * - +76:  Triangle count (2 bytes)
- * - +78:  Vertex count (2 bytes)
- * 
- * Position stride: 16 if upper byte bit 4 set, else 12
+ * Returns vector of LzoDescriptor with all fields populated.
  */
-struct LzoDescriptorInternal {
-    uint32_t decomp_size;      // +LZO4_DECOMP_SIZE_OFFSET from LZO4
-    uint32_t format_flags;     // +LZO4_FORMAT_FLAGS_OFFSET from LZO4 (full 32-bit value)
-    uint16_t triangle_count;   // +LZO4_TRIANGLE_COUNT_OFFSET from LZO4
-    uint16_t vertex_count;     // +LZO4_VERTEX_COUNT_OFFSET from LZO4
-    int position_stride;       // Calculated: XOB_POSITION_STRIDE_12 or _16 bytes
-    uint8_t flag_byte;         // Low byte of format_flags
-    bool has_normals;
-    bool has_uvs;
-    bool has_tangents;
-    bool has_skinning;
-    bool has_extra_normals;
-};
-
-static std::vector<LzoDescriptorInternal> parse_lzo4_descriptors(const uint8_t* data, size_t size) {
-    std::vector<LzoDescriptorInternal> descriptors;
+static std::vector<LzoDescriptor> parse_lzo4_descriptors_v8(const uint8_t* data, size_t size) {
+    std::vector<LzoDescriptor> descriptors;
     
-    std::cerr << "[XOB] Parsing LZO4 descriptors from HEAD chunk, size=" << size << "\n";
+    LOG_DEBUG("XobParser", "Parsing LZO4 descriptors from HEAD chunk, size=" << size);
     
     // Search for LZO4 markers
     size_t pos = 0;
@@ -269,484 +262,1223 @@ static std::vector<LzoDescriptorInternal> parse_lzo4_descriptors(const uint8_t* 
         
         if (found == SIZE_MAX) break;
         
-        // Ensure we have enough data for all required fields
-        if (found + LZO4_MIN_REQUIRED_BYTES > size) break;
+        // Ensure we have enough data for full descriptor (116 bytes)
+        if (found + LZO4_DESCRIPTOR_SIZE > size) {
+            LOG_WARNING("XobParser", "Truncated LZO4 descriptor at offset " << found);
+            break;
+        }
         
-        LzoDescriptorInternal d;
+        const uint8_t* desc = data + found;
+        LzoDescriptor d;
         
-        // All offsets are from the LZO4 marker position
-        // Python: desc = head_data[idx:idx+116] where idx is position of "LZO4"
-        // So desc[28:32] means offset 28 from LZO4, etc.
+        // Per spec v8 section 2.3 - all offsets from LZO4 marker:
         
-        // Decompressed size at offset +28 from LZO4
-        d.decomp_size = read_u32_le(data + found + LZO4_DECOMP_SIZE_OFFSET);
+        // +0x04: LOD quality tier (1-5)
+        d.quality_tier = read_u32_le(desc + LZO4_OFF_QUALITY_TIER);
         
-        // Format flags at offset +32 from LZO4
-        d.format_flags = read_u32_le(data + found + LZO4_FORMAT_FLAGS_OFFSET);
-        d.flag_byte = d.format_flags & 0xFF;
+        // +0x0C: LOD switch distance (screen coverage ratio)
+        d.switch_distance = read_f32_le(desc + LZO4_OFF_SWITCH_DIST);
         
-        // Parse attribute flags from low byte using documented bit masks
-        d.has_normals = (d.flag_byte & XOB_FLAG_NORMALS) != 0;
-        d.has_uvs = (d.flag_byte & XOB_FLAG_UVS) != 0;
-        d.has_tangents = (d.flag_byte & XOB_FLAG_TANGENTS) != 0;
-        d.has_skinning = (d.flag_byte & XOB_FLAG_SKINNING) != 0;
-        d.has_extra_normals = (d.flag_byte & XOB_FLAG_EXTRA_NORMALS) != 0;
+        // +0x14: Compressed data size in LODS chunk
+        d.compressed_size = read_u32_le(desc + LZO4_OFF_COMPRESSED);
         
-        // Triangle and vertex counts from LZO4 descriptor
-        d.triangle_count = read_u16_le(data + found + LZO4_TRIANGLE_COUNT_OFFSET);
-        d.vertex_count = read_u16_le(data + found + LZO4_VERTEX_COUNT_OFFSET);
+        // +0x1C: Decompressed mesh data size
+        d.decompressed_size = read_u32_le(desc + LZO4_OFF_DECOMPRESSED);
         
-        // Position stride: determined by bit 4 of upper byte of format_flags
-        uint8_t upper_byte = (d.format_flags >> 24) & 0xFF;
-        d.position_stride = (upper_byte & XOB_STRIDE_16_BIT) ? XOB_POSITION_STRIDE_16 : XOB_POSITION_STRIDE_12;
+        // +0x20: Format flags (high byte = mesh type, low byte = format index)
+        d.format_flags = read_u32_le(desc + LZO4_OFF_FORMAT_FLAGS);
+        d.mesh_type = (d.format_flags >> 24) & 0xFF;
         
-        std::cerr << "[XOB] LOD " << descriptors.size() << ": offset=" << found 
-                  << " decomp=" << d.decomp_size
+        // +0x24-0x3B: LOD bounding box
+        d.bounds_min.x = read_f32_le(desc + LZO4_OFF_BBOX_MIN);
+        d.bounds_min.y = read_f32_le(desc + LZO4_OFF_BBOX_MIN + 4);
+        d.bounds_min.z = read_f32_le(desc + LZO4_OFF_BBOX_MIN + 8);
+        d.bounds_max.x = read_f32_le(desc + LZO4_OFF_BBOX_MAX);
+        d.bounds_max.y = read_f32_le(desc + LZO4_OFF_BBOX_MAX + 4);
+        d.bounds_max.z = read_f32_le(desc + LZO4_OFF_BBOX_MAX + 8);
+        
+        // +0x4C-0x52: Mesh counts
+        d.triangle_count = read_u16_le(desc + LZO4_OFF_TRIANGLE_COUNT);
+        d.unique_vertex_count = read_u16_le(desc + LZO4_OFF_UNIQUE_VERTS);
+        d.original_vertex_count = read_u16_le(desc + LZO4_OFF_ORIG_VERTS);
+        d.submesh_index = read_u16_le(desc + LZO4_OFF_SUBMESH_IDX);
+        
+        // +0x58: Attribute configuration (8 bytes)
+        std::memcpy(d.attr_config, desc + LZO4_OFF_ATTR_CONFIG, 8);
+        
+        // +0x60-0x6F: UV bounds
+        d.uv_min_u = read_f32_le(desc + LZO4_OFF_UV_BOUNDS);
+        d.uv_max_u = read_f32_le(desc + LZO4_OFF_UV_BOUNDS + 4);
+        d.uv_min_v = read_f32_le(desc + LZO4_OFF_UV_BOUNDS + 8);
+        d.uv_max_v = read_f32_le(desc + LZO4_OFF_UV_BOUNDS + 12);
+        
+        // +0x70: Surface scale factor
+        d.surface_scale = read_f32_le(desc + LZO4_OFF_SURFACE_SCALE);
+        
+        // Derive properties from mesh_type (per spec v8 section 3.1)
+        // Position stride: skinned meshes (0x1F, 0x9F) use 16-byte, static (0x0F, 0x8F) use 12-byte
+        d.position_stride = (d.mesh_type & 0x10) ? XOB_POSITION_STRIDE_16 : XOB_POSITION_STRIDE_12;
+        
+        // Attribute presence from mesh type
+        d.has_normals = true;  // All meshes have normals
+        d.has_tangents = true;  // All meshes have tangents for normal mapping
+        d.has_uvs = true;  // All meshes have at least one UV set
+        d.has_skinning = (d.mesh_type == XOB_MESH_SKINNED || d.mesh_type == XOB_MESH_SKINNED_EMISSIVE);
+        d.has_second_uv = (d.mesh_type == XOB_MESH_EMISSIVE || d.mesh_type == XOB_MESH_SKINNED_EMISSIVE);
+        d.has_vertex_color = d.has_second_uv;  // Emissive meshes often have vertex color
+        
+        // Override from attribute config if available
+        if (d.attr_config[ATTR_CFG_UV_SETS] > 0) {
+            d.has_second_uv = (d.attr_config[ATTR_CFG_UV_SETS] >= 2);
+        }
+        if (d.attr_config[ATTR_CFG_BONE_STREAMS] > 0) {
+            d.has_skinning = true;
+        }
+        
+        LOG_DEBUG("XobParser", "LOD " << descriptors.size() 
+                  << ": type=0x" << std::hex << (int)d.mesh_type << std::dec
+                  << " comp=" << d.compressed_size
+                  << " decomp=" << d.decompressed_size
                   << " tris=" << d.triangle_count 
-                  << " verts=" << d.vertex_count 
+                  << " verts=" << d.unique_vertex_count 
                   << " stride=" << d.position_stride
-                  << " flags=0x" << std::hex << d.format_flags << std::dec << "\n";
+                  << " uv_sets=" << (int)d.attr_config[ATTR_CFG_UV_SETS]
+                  << " bones=" << (int)d.attr_config[ATTR_CFG_BONE_STREAMS]);
         
         descriptors.push_back(d);
-        pos = found + 4;
+        pos = found + LZO4_MARKER_SIZE;  // Continue searching after this marker
     }
     
-    std::cerr << "[XOB] Found " << descriptors.size() << " LOD descriptors\n";
+    LOG_DEBUG("XobParser", "Found " << descriptors.size() << " LOD descriptors");
     return descriptors;
-}
-
-/**
- * Extract LOD region from decompressed data
- * 
- * CORRECTED: Analysis shows LOD0 data starts at offset 0 of the decompressed buffer,
- * not at the end. The decomp_size in the descriptor refers to total decompressed size,
- * not per-LOD region size.
- */
-static std::vector<uint8_t> extract_lod_region_internal(
-    const std::vector<uint8_t>& decompressed,
-    const std::vector<LzoDescriptorInternal>& descriptors,
-    size_t lod_index
-) {
-    if (lod_index >= descriptors.size()) return {};
-    
-    const auto& desc = descriptors[lod_index];
-    
-    // Calculate expected size based on vertex attributes with overflow protection
-    // Use uint64_t for intermediate calculations to prevent overflow
-    constexpr size_t MAX_SAFE_SIZE = 1024 * 1024 * 256;  // 256MB max reasonable mesh size
-    
-    uint64_t idx_size = static_cast<uint64_t>(desc.triangle_count) * 3 * XOB_INDEX_SIZE;  // bytes per index array
-    uint64_t expected_size = idx_size * XOB_INDEX_ARRAYS;  // Two index arrays
-    expected_size += static_cast<uint64_t>(desc.vertex_count) * desc.position_stride;  // Positions
-    
-    // Add optional attributes based on flags
-    if (desc.has_normals) expected_size += static_cast<uint64_t>(desc.vertex_count) * XOB_NORMAL_SIZE;
-    
-    // UV stride: 4 bytes if has_uvs (0x04) is set (compact), 8 bytes otherwise
-    size_t uv_stride = desc.has_uvs ? XOB_UV_SIZE : 8;
-    expected_size += static_cast<uint64_t>(desc.vertex_count) * uv_stride;  // UVs
-    
-    // Check for overflow before continuing
-    if (expected_size > MAX_SAFE_SIZE) {
-        LOG_ERROR("XobParser", "Calculated mesh size exceeds maximum (" << expected_size << " > " << MAX_SAFE_SIZE << ")");
-        return {};
-    }
-    
-    // CORRECTED: When tangents AND skinning are both present, they form a combined
-    // 20-byte structure containing: [bone_idx(4) + tangent_frame(8) + tangent(4) + normal(4)]
-    // We only need to account for tangents here (4 bytes) since normals are already counted
-    if (desc.has_tangents) expected_size += static_cast<uint64_t>(desc.vertex_count) * XOB_TANGENT_SIZE;
-    if (desc.has_skinning) expected_size += static_cast<uint64_t>(desc.vertex_count) * 8;
-    if (desc.has_extra_normals) expected_size += static_cast<uint64_t>(desc.vertex_count) * XOB_EXTRA_SIZE;
-    
-    LOG_DEBUG("XobParser", "LOD " << lod_index << " extraction: decomp_size=" << desc.decomp_size 
-              << " expected_size=" << expected_size << " buffer_size=" << decompressed.size());
-    
-    // CORRECTED: LOD0 data starts at offset 0, not at the end of the buffer
-    // The decomp_size field often contains total decompressed size, not per-LOD size
-    // For single-LOD meshes (most common), extract from beginning of buffer
-    
-    // Use calculated expected_size as the region size (safe cast after overflow check)
-    size_t region_size = static_cast<size_t>(expected_size);
-    
-    // If decompressed buffer is smaller than expected, use what we have
-    if (region_size > decompressed.size()) {
-        LOG_WARNING("XobParser", "expected_size > decompressed.size(), clamping");
-        region_size = decompressed.size();
-    }
-    
-    // For LOD0 (highest detail), data starts at offset 0
-    // For multi-LOD files, we'd need to calculate offsets differently
-    size_t start_pos = 0;
-    size_t end_pos = region_size;
-    
-    // If there are multiple LODs and we're not requesting LOD0,
-    // we'd need to skip previous LOD data (future enhancement)
-    if (descriptors.size() > 1 && lod_index > 0) {
-        LOG_WARNING("XobParser", "Multi-LOD extraction not fully implemented");
-        // For now, just try to extract from start
-    }
-    
-    LOG_DEBUG("XobParser", "Using region: start=" << start_pos << " end=" << end_pos 
-              << " size=" << (end_pos - start_pos));
-    
-    if (start_pos >= end_pos || end_pos > decompressed.size()) {
-        LOG_ERROR("XobParser", "Invalid region bounds");
-        return {};
-    }
-    
-    return std::vector<uint8_t>(decompressed.begin() + start_pos, decompressed.begin() + end_pos);
 }
 
 /**
  * Parse mesh from LOD region
  * 
- * CORRECTED Layout based on format flags:
- *   indices_array_1: u16[triangle_count * 3]
- *   indices_array_2: u16[triangle_count * 3] (duplicate/unused)
- *   positions: float[vertex_count * stride] (12 or 16 bytes)
- *   [normals: u32[vertex_count]]            (4 bytes each, if has_normals)
- *   [uvs: u16[vertex_count * 4]]            (8 bytes each - 2 UV channels, if has_uvs)
- *   [tangents: u32[vertex_count]]           (4 bytes each, if has_tangents)
- *   [skinning: 8 bytes per vertex]          (if has_skinning - 4 bone indices + 4 weights)
- *   [extra: 8 bytes per vertex]             (if has_extra_normals)
+ * Per XOB9_FORMAT_SPEC_v8.md section 4.2-4.3:
+ * 
+ * Decompressed data layout:
+ *   [index_array]  - u16[triangle_count * 3]
+ *   [vertex_array] - interleaved attributes, count = unique_vertex_count
+ *
+ * Vertex layouts by mesh type (section 4.3):
+ *   Static (0x0F) - 20 bytes/vertex:
+ *     Position f32[3] (12 bytes) + Normal u8[4] (4 bytes) + Tangent u8[4] (4 bytes)
+ *     
+ *   Emissive (0x8F) - 32+ bytes/vertex:
+ *     Position f32[3] (12) + Normal u8[4] (4) + Tangent u8[4] (4) + 
+ *     UV0 f16[2] (4) + UV1 f16[2] (4) + VertexColor u8[4] (4)
+ *     
+ *   Skinned (0x1F) - Variable:
+ *     Base attributes + bone weights/indices
  */
 static bool parse_mesh_from_region(
     const std::vector<uint8_t>& region,
     uint16_t vertex_count,
     uint16_t triangle_count,
-    int position_stride,
-    bool has_normals,
-    bool has_uvs,
-    bool has_tangents,
-    bool has_skinning,
-    bool has_extra_normals,
+    uint8_t mesh_type,  // High byte of format_flags: 0x0F=static, 0x8F=emissive, 0x1F=skinned
+    uint8_t bone_streams, // Number of bone weight streams (0, 1, or 2)
     XobMesh& mesh
 ) {
-    std::cerr << "[XOB] parse_mesh_from_region: region_size=" << region.size() 
+    LOG_DEBUG("XobParser", "parse_mesh_from_region: region_size=" << region.size() 
               << " verts=" << vertex_count << " tris=" << triangle_count 
-              << " stride=" << position_stride
-              << " normals=" << has_normals << " uvs=" << has_uvs 
-              << " tangents=" << has_tangents << " skinning=" << has_skinning
-              << " extra=" << has_extra_normals << "\n";
+              << " mesh_type=0x" << std::hex << (int)mesh_type << std::dec);
     
     if (vertex_count == 0 || triangle_count == 0 || region.empty()) {
-        std::cerr << "[XOB] Invalid parameters\n";
+        LOG_ERROR("XobParser", "Invalid parameters: verts=" << vertex_count 
+                  << " tris=" << triangle_count << " region=" << region.size());
         return false;
     }
     
     uint32_t index_count = static_cast<uint32_t>(triangle_count) * 3;
-    size_t idx_array_size = index_count * XOB_INDEX_SIZE; // XOB_INDEX_SIZE bytes per 16-bit index
+    size_t idx_array_size = index_count * XOB_INDEX_SIZE;
     
-    // CRITICAL: Two index arrays before positions (Python: pos_offset = idx_size * 2)
-    size_t pos_offset = idx_array_size * XOB_INDEX_ARRAYS;
+    // ACTUAL DATA LAYOUT (empirically confirmed):
+    // The data has TWO index arrays, not one as the spec suggests:
+    //   [index_array_1: triangle_count * 3 * 2 bytes] - triangle indices
+    //   [index_array_2: triangle_count * 3 * 2 bytes] - dedup/original vertex mapping
+    //   [vertex_data: vertex_count * vertex_stride bytes] - interleaved vertex data
+    //
+    // Evidence: bytes after first index array start with "00 00 01 00 02 00 01 00 03 00..."
+    // which are clearly more u16 indices (0, 1, 2, 1, 3, 2...), not float positions.
     
-    std::cerr << "[XOB] index_count=" << index_count << " idx_array_size=" << idx_array_size 
-              << " pos_offset=" << pos_offset << "\n";
+    size_t dual_idx_array_size = idx_array_size * 2;  // Two index arrays
+    size_t vertex_data_offset = dual_idx_array_size;
     
-    if (pos_offset >= region.size()) {
-        std::cerr << "[XOB] pos_offset >= region.size()\n";
+    LOG_DEBUG("XobParser", "index_count=" << index_count << " idx_array_size=" << idx_array_size 
+              << " dual_idx_array_size=" << dual_idx_array_size
+              << " vertex_data_offset=" << vertex_data_offset);
+    
+    if (vertex_data_offset >= region.size()) {
+        LOG_ERROR("XobParser", "vertex_data_offset >= region.size()");
         return false;
     }
     
-    // Debug: compare first vs second index array to understand their difference
-    size_t differ_count = 0;
-    for (uint32_t i = 0; i < index_count; i++) {
-        uint16_t idx1 = read_u16_le(region.data() + i * 2);
-        uint16_t idx2 = read_u16_le(region.data() + idx_array_size + i * 2);
-        if (idx1 != idx2) {
-            differ_count++;
-            if (differ_count <= 5) {
-                LOG_DEBUG("XobParser", "Index array diff at " << i << ": arr1=" << idx1 << " arr2=" << idx2);
-            }
-        }
-    }
-    if (differ_count > 0) {
-        LOG_INFO("XobParser", "WARNING: Index arrays differ! " << differ_count << " differences");
-    } else {
-        LOG_DEBUG("XobParser", "Index arrays are identical");
-    }
-    
-    // Array 1 is the geometry index buffer (correct positions)
-    // Array 2 appears to be something else (LOD, collision, etc.) - causes broken geometry
-    // Always use Array 1 for rendering
-    
-    // Extract indices from Array 1
-    // Note: i * 2 + 2 <= idx_array_size ensures we can read 2 bytes at offset i * 2
+    // Extract indices from the index arrays
+    // XOB has DUAL index arrays but second array has out-of-bounds indices
+    // Need to use FIRST array and figure out proper material assignment
     mesh.indices.clear();
     mesh.indices.reserve(index_count);
+    
+    // Use first array (valid position indices)
     for (uint32_t i = 0; i < index_count && (i * 2 + 2) <= idx_array_size; i++) {
-        uint16_t idx = read_u16_le(region.data() + i * 2);  // Always use Array 1
+        uint16_t idx = read_u16_le(region.data() + i * 2);
         mesh.indices.push_back(static_cast<uint32_t>(idx));
     }
+    LOG_DEBUG("XobParser", "Using FIRST index array");
     
-    // Debug: print first 20 indices
-    std::ostringstream idx_str;
-    idx_str << "First 20 indices: ";
-    for (size_t i = 0; i < std::min<size_t>(20, mesh.indices.size()); i++) {
-        idx_str << mesh.indices[i] << " ";
+    // Analyze both arrays thoroughly
+    {
+        uint16_t first_max = 0, second_max = 0;
+        uint16_t first_min = 65535, second_min = 65535;
+        uint32_t mismatch_count = 0;
+        
+        for (uint32_t i = 0; i < index_count; i++) {
+            uint16_t first_val = read_u16_le(region.data() + i * 2);
+            first_max = std::max(first_max, first_val);
+            first_min = std::min(first_min, first_val);
+            
+            size_t offset = idx_array_size + i * 2;
+            if (offset + 2 <= dual_idx_array_size) {
+                uint16_t second_val = read_u16_le(region.data() + offset);
+                second_max = std::max(second_max, second_val);
+                second_min = std::min(second_min, second_val);
+                if (first_val != second_val) mismatch_count++;
+            }
+        }
+        
+        LOG_DEBUG("XobParser", "First array: min=" << first_min << " max=" << first_max << " (vertex_count=" << vertex_count << ")");
+        LOG_DEBUG("XobParser", "Second array: min=" << second_min << " max=" << second_max);
+        LOG_DEBUG("XobParser", "Mismatches: " << mismatch_count << "/" << index_count << " (" << (100*mismatch_count/index_count) << "%)");
+        
+        // Check if second array might be triangle-local (values 0-2 for each tri)
+        uint32_t second_low_count = 0;
+        for (uint32_t i = 0; i < index_count; i++) {
+            size_t offset = idx_array_size + i * 2;
+            if (offset + 2 <= dual_idx_array_size) {
+                uint16_t val = read_u16_le(region.data() + offset);
+                if (val < 3) second_low_count++;
+            }
+        }
+        LOG_DEBUG("XobParser", "Second array values < 3: " << second_low_count << "/" << index_count);
     }
-    LOG_DEBUG("XobParser", idx_str.str());
     
-    // Debug: print first 32 raw bytes
-    std::ostringstream hex_str;
-    hex_str << "First 32 raw bytes: ";
-    for (size_t i = 0; i < std::min<size_t>(32, region.size()); i++) {
-        hex_str << std::hex << std::setw(2) << std::setfill('0') << (int)region[i];
+    // Debug: print first 30 indices from both arrays side by side
+    {
+        std::ostringstream cmp_str;
+        cmp_str << "Index comparison (first 30):\n";
+        cmp_str << "  Idx | First | Second | Diff\n";
+        for (size_t i = 0; i < std::min<size_t>(30, index_count); i++) {
+            uint16_t first_val = read_u16_le(region.data() + i * 2);
+            size_t offset = idx_array_size + i * 2;
+            uint16_t second_val = (offset + 2 <= dual_idx_array_size) ? read_u16_le(region.data() + offset) : 0;
+            cmp_str << "  " << std::setw(3) << i << " | " << std::setw(5) << first_val 
+                    << " | " << std::setw(6) << second_val 
+                    << " | " << (first_val != second_val ? "DIFF" : "same") << "\n";
+        }
+        LOG_DEBUG("XobParser", cmp_str.str());
+        
+        // NEW: Analyze first 5 triangles with actual vertex positions
+        LOG_DEBUG("XobParser", "=== TRIANGLE VERTEX POSITION ANALYSIS ===");
+        for (size_t tri = 0; tri < 5 && tri * 3 + 2 < index_count; tri++) {
+            size_t base = tri * 3;
+            
+            // Get indices from both arrays
+            uint16_t f0 = read_u16_le(region.data() + (base + 0) * 2);
+            uint16_t f1 = read_u16_le(region.data() + (base + 1) * 2);
+            uint16_t f2 = read_u16_le(region.data() + (base + 2) * 2);
+            
+            uint16_t s0 = read_u16_le(region.data() + idx_array_size + (base + 0) * 2);
+            uint16_t s1 = read_u16_le(region.data() + idx_array_size + (base + 1) * 2);
+            uint16_t s2 = read_u16_le(region.data() + idx_array_size + (base + 2) * 2);
+            
+            // Helper to read position at an index
+            auto read_pos = [&](uint16_t idx) -> std::tuple<float, float, float, bool> {
+                if (idx >= vertex_count) return {0, 0, 0, false};
+                size_t pos_off = vertex_data_offset + idx * 12;
+                if (pos_off + 12 > region.size()) return {0, 0, 0, false};
+                float x = read_f32_le(region.data() + pos_off);
+                float y = read_f32_le(region.data() + pos_off + 4);
+                float z = read_f32_le(region.data() + pos_off + 8);
+                return {x, y, z, true};
+            };
+            
+            std::ostringstream tri_str;
+            tri_str << std::fixed << std::setprecision(3);
+            tri_str << "Triangle " << tri << ":\n";
+            tri_str << "  First array indices:  [" << f0 << ", " << f1 << ", " << f2 << "]\n";
+            tri_str << "  Second array indices: [" << s0 << ", " << s1 << ", " << s2 << "]\n";
+            
+            auto [fx0, fy0, fz0, fv0] = read_pos(f0);
+            auto [fx1, fy1, fz1, fv1] = read_pos(f1);
+            auto [fx2, fy2, fz2, fv2] = read_pos(f2);
+            
+            tri_str << "  First array positions:\n";
+            tri_str << "    v0: " << (fv0 ? "" : "INVALID ") << "(" << fx0 << ", " << fy0 << ", " << fz0 << ")\n";
+            tri_str << "    v1: " << (fv1 ? "" : "INVALID ") << "(" << fx1 << ", " << fy1 << ", " << fz1 << ")\n";
+            tri_str << "    v2: " << (fv2 ? "" : "INVALID ") << "(" << fx2 << ", " << fy2 << ", " << fz2 << ")\n";
+            
+            auto [sx0, sy0, sz0, sv0] = read_pos(s0);
+            auto [sx1, sy1, sz1, sv1] = read_pos(s1);
+            auto [sx2, sy2, sz2, sv2] = read_pos(s2);
+            
+            tri_str << "  Second array positions:\n";
+            tri_str << "    v0: " << (sv0 ? "" : "INVALID ") << "(" << sx0 << ", " << sy0 << ", " << sz0 << ")\n";
+            tri_str << "    v1: " << (sv1 ? "" : "INVALID ") << "(" << sx1 << ", " << sy1 << ", " << sz1 << ")\n";
+            tri_str << "    v2: " << (sv2 ? "" : "INVALID ") << "(" << sx2 << ", " << sy2 << ", " << sz2 << ")\n";
+            
+            LOG_DEBUG("XobParser", tri_str.str());
+        }
+        
+        // Check if one array is an offset/permutation of the other
+        LOG_DEBUG("XobParser", "=== ARRAY RELATIONSHIP ANALYSIS ===");
+        
+        // Check if second = first + constant offset
+        std::map<int32_t, uint32_t> offset_counts;
+        for (size_t i = 0; i < std::min<size_t>(1000, index_count); i++) {
+            uint16_t first_val = read_u16_le(region.data() + i * 2);
+            size_t offset = idx_array_size + i * 2;
+            if (offset + 2 <= dual_idx_array_size) {
+                uint16_t second_val = read_u16_le(region.data() + offset);
+                int32_t diff = (int32_t)second_val - (int32_t)first_val;
+                offset_counts[diff]++;
+            }
+        }
+        
+        std::ostringstream offset_str;
+        offset_str << "Offset distribution (second - first):\n";
+        std::vector<std::pair<int32_t, uint32_t>> sorted_offsets(offset_counts.begin(), offset_counts.end());
+        std::sort(sorted_offsets.begin(), sorted_offsets.end(), 
+                  [](auto& a, auto& b) { return a.second > b.second; });
+        for (size_t i = 0; i < std::min<size_t>(10, sorted_offsets.size()); i++) {
+            offset_str << "  diff=" << sorted_offsets[i].first << " count=" << sorted_offsets[i].second << "\n";
+        }
+        LOG_DEBUG("XobParser", offset_str.str());
     }
-    LOG_DEBUG("XobParser", hex_str.str());
+    
+    // DUMP BOTH ARRAYS TO FILES FOR STATIC ANALYSIS
+    {
+        // Dump first index array
+        std::ofstream first_dump("xob_index_array_1.bin", std::ios::binary);
+        if (first_dump) {
+            first_dump.write(reinterpret_cast<const char*>(region.data()), idx_array_size);
+            first_dump.close();
+            LOG_INFO("XobParser", "Dumped first index array to xob_index_array_1.bin (" << idx_array_size << " bytes, " << index_count << " indices)");
+        }
+        
+        // Dump second index array
+        std::ofstream second_dump("xob_index_array_2.bin", std::ios::binary);
+        if (second_dump) {
+            second_dump.write(reinterpret_cast<const char*>(region.data() + idx_array_size), idx_array_size);
+            second_dump.close();
+            LOG_INFO("XobParser", "Dumped second index array to xob_index_array_2.bin (" << idx_array_size << " bytes, " << index_count << " indices)");
+        }
+        
+        // Dump vertex data (first 1MB or all)
+        size_t vertex_dump_size = std::min<size_t>(region.size() - vertex_data_offset, 1024 * 1024);
+        std::ofstream vert_dump("xob_vertex_data.bin", std::ios::binary);
+        if (vert_dump) {
+            vert_dump.write(reinterpret_cast<const char*>(region.data() + vertex_data_offset), vertex_dump_size);
+            vert_dump.close();
+            LOG_INFO("XobParser", "Dumped vertex data to xob_vertex_data.bin (" << vertex_dump_size << " bytes)");
+        }
+        
+        // Dump analysis text file
+        std::ofstream analysis("xob_array_analysis.txt");
+        if (analysis) {
+            analysis << "=== XOB INDEX ARRAY ANALYSIS ===\n\n";
+            analysis << "Index count: " << index_count << "\n";
+            analysis << "Triangle count: " << triangle_count << "\n";
+            analysis << "Vertex count: " << vertex_count << "\n";
+            analysis << "Mesh type: 0x" << std::hex << (int)mesh_type << std::dec << "\n\n";
+            
+            analysis << "=== FIRST 100 TRIANGLES ===\n";
+            analysis << "Tri# | First[0] First[1] First[2] | Second[0] Second[1] Second[2] | Match?\n";
+            analysis << "-----+---------------------------+-----------------------------+-------\n";
+            
+            for (size_t tri = 0; tri < std::min<size_t>(100, triangle_count); tri++) {
+                size_t base = tri * 3;
+                uint16_t f0 = read_u16_le(region.data() + (base + 0) * 2);
+                uint16_t f1 = read_u16_le(region.data() + (base + 1) * 2);
+                uint16_t f2 = read_u16_le(region.data() + (base + 2) * 2);
+                
+                uint16_t s0 = read_u16_le(region.data() + idx_array_size + (base + 0) * 2);
+                uint16_t s1 = read_u16_le(region.data() + idx_array_size + (base + 1) * 2);
+                uint16_t s2 = read_u16_le(region.data() + idx_array_size + (base + 2) * 2);
+                
+                bool match = (f0 == s0 && f1 == s1 && f2 == s2);
+                
+                analysis << std::setw(4) << tri << " | " 
+                         << std::setw(8) << f0 << " " << std::setw(8) << f1 << " " << std::setw(8) << f2 << " | "
+                         << std::setw(9) << s0 << " " << std::setw(9) << s1 << " " << std::setw(9) << s2 << " | "
+                         << (match ? "YES" : "NO") << "\n";
+            }
+            
+            analysis << "\n=== COMPLETE FIRST ARRAY (all " << index_count << " values) ===\n";
+            for (size_t i = 0; i < index_count; i++) {
+                uint16_t val = read_u16_le(region.data() + i * 2);
+                analysis << val;
+                if ((i + 1) % 20 == 0) analysis << "\n";
+                else analysis << " ";
+            }
+            
+            analysis << "\n\n=== COMPLETE SECOND ARRAY (all " << index_count << " values) ===\n";
+            for (size_t i = 0; i < index_count; i++) {
+                uint16_t val = read_u16_le(region.data() + idx_array_size + i * 2);
+                analysis << val;
+                if ((i + 1) % 20 == 0) analysis << "\n";
+                else analysis << " ";
+            }
+            
+            analysis << "\n\n=== VERTEX POSITIONS (first 100) ===\n";
+            for (size_t i = 0; i < std::min<size_t>(100, vertex_count); i++) {
+                size_t pos_off = vertex_data_offset + i * 12;
+                if (pos_off + 12 <= region.size()) {
+                    float x = read_f32_le(region.data() + pos_off);
+                    float y = read_f32_le(region.data() + pos_off + 4);
+                    float z = read_f32_le(region.data() + pos_off + 8);
+                    analysis << "v" << i << ": (" << x << ", " << y << ", " << z << ")\n";
+                }
+            }
+            
+            analysis.close();
+            LOG_INFO("XobParser", "Dumped array analysis to xob_array_analysis.txt");
+        }
+    }
     
     // Validate indices
     uint32_t max_idx = 0;
     for (uint32_t idx : mesh.indices) {
         if (idx > max_idx) max_idx = idx;
     }
-    std::cerr << "[XOB] max_idx=" << max_idx << "\n";
+    LOG_DEBUG("XobParser", "max_idx=" << max_idx << " vertex_count=" << vertex_count);
     if (max_idx >= vertex_count) {
-        // Bad indices - clamp them
+        LOG_WARNING("XobParser", "Index out of range, clamping: max_idx=" << max_idx 
+                    << " >= vertex_count=" << vertex_count);
         for (uint32_t& idx : mesh.indices) {
             if (idx >= vertex_count) idx = 0;
         }
     }
     
-    // Extract positions
+    // Determine vertex stride based on mesh type (per spec v8 section 4.3)
+    // Static (0x0F): 20 bytes = pos(12) + normal(4) + tangent(4)
+    // Emissive (0x8F): 32 bytes = pos(12) + normal(4) + tangent(4) + UV0(4) + UV1(4) + color(4)
+    // Skinned (0x1F): Variable (base + bone data)
+    // Skinned+Emissive (0x9F): Variable
+    size_t vertex_stride;
+    bool has_embedded_uvs = false;
+    bool has_vertex_color = false;
+    bool has_second_uv = false;
+    
+    // Calculate actual stride from data size - this is more reliable than guessing
+    size_t vertex_data_size_for_stride = region.size() - vertex_data_offset;
+    size_t detected_stride = vertex_data_size_for_stride / vertex_count;
+    
+    switch (mesh_type) {
+        case XOB_MESH_STATIC:  // 0x0F
+            // Static: minimum 20 bytes (pos + normal + tangent)
+            // Use detected stride if data is larger
+            vertex_stride = std::max<size_t>(20, detected_stride);
+            // Static meshes also have UVs in separated streams!
+            has_embedded_uvs = true;
+            break;
+        case XOB_MESH_EMISSIVE:  // 0x8F
+            // Emissive: minimum 32 bytes (pos + normal + tangent + UV0 + UV1 + color)
+            // But often has extra data, so use detected stride
+            vertex_stride = std::max<size_t>(32, detected_stride);
+            has_embedded_uvs = true;
+            has_second_uv = true;
+            has_vertex_color = true;
+            break;
+        case XOB_MESH_SKINNED:  // 0x1F
+            // Skinned meshes: minimum 20 + bone data
+            vertex_stride = std::max<size_t>(20, detected_stride);
+            // Skinned meshes also have UVs!
+            has_embedded_uvs = true;
+            LOG_DEBUG("XobParser", "Skinned mesh: detected stride=" << detected_stride);
+            break;
+        case XOB_MESH_SKINNED_EMISSIVE:  // 0x9F
+            // Skinned + emissive: minimum 32 + bone data
+            vertex_stride = std::max<size_t>(32, detected_stride);
+            has_embedded_uvs = true;
+            has_second_uv = true;
+            has_vertex_color = true;
+            LOG_DEBUG("XobParser", "Skinned+emissive mesh: detected stride=" << detected_stride);
+            break;
+        default:
+            // Unknown type - use detected stride, assume has UVs
+            vertex_stride = std::max<size_t>(20, detected_stride);
+            has_embedded_uvs = true;
+            LOG_WARNING("XobParser", "Unknown mesh type 0x" << std::hex << (int)mesh_type 
+                        << std::dec << ", detected stride=" << detected_stride);
+            break;
+    }
+    
+    size_t vertex_data_size = region.size() - vertex_data_offset;
+    LOG_DEBUG("XobParser", "Using vertex_stride=" << vertex_stride 
+              << " vertex_data_size=" << vertex_data_size
+              << " expected=" << (vertex_count * vertex_stride)
+              << " embedded_uvs=" << has_embedded_uvs);
+    
+    // Check if data looks like separated streams vs interleaved
+    // CRITICAL: Compare against the MINIMUM possible interleaved size (20 bytes = pos + normal + tangent)
+    // Not the detected stride, which can be wrong for meshes with extra data streams.
+    // If vertex_data_size is way larger than minimum_interleaved, it's separated streams.
+    //
+    // For separated streams layout, the minimum expected size would be:
+    // positions(12) + normals(4) + tangents(4) = 20 bytes per vertex
+    // With UVs: + UV0(4) + UV1(4) = 28 bytes per vertex  
+    // With colors: + colors(4) = 32 bytes per vertex
+    //
+    // The actual data may have bone weights/indices which add more, but these are
+    // stored AFTER the base streams in separated layout.
+    
+    size_t minimum_interleaved = static_cast<size_t>(vertex_count) * 20;  // Bare minimum: pos + norm + tan
+    size_t expected_with_uvs = static_cast<size_t>(vertex_count) * 32;    // With UVs and colors
+    
+    // Detect layout by probing data at expected separated streams UV offset
+    // If UV data looks valid there, use separated streams; otherwise interleaved
+    //
+    // For separated streams, UV0 starts at: vertex_data_offset + pos_stream + norm_stream + tan_stream [+ extra]
+    // The "extra" depends on mesh type:
+    // - Emissive (0x8f): may have color stream before UVs
+    // - Skinned (0x1f/0x9f): may have bone data before UVs
+    size_t test_pos_stream = static_cast<size_t>(vertex_count) * 12;
+    size_t test_norm_stream = static_cast<size_t>(vertex_count) * 4;
+    size_t test_tan_stream = static_cast<size_t>(vertex_count) * 4;
+    size_t test_color_stream = static_cast<size_t>(vertex_count) * 4;  // For emissive meshes
+    
+    // Calculate UV offset for different layouts
+    size_t base_offset_dual = vertex_data_offset + test_pos_stream + test_norm_stream + test_tan_stream;
+    size_t test_uv0_offset_dual = base_offset_dual;  // No extra data
+    size_t test_uv0_offset_dual_with_color = base_offset_dual + test_color_stream;  // Color before UV
+    
+    // Also try with single index array (some meshes don't have dual)
+    size_t single_idx_vertex_offset = idx_array_size;  // Just one index array
+    size_t base_offset_single = single_idx_vertex_offset + test_pos_stream + test_norm_stream + test_tan_stream;
+    size_t test_uv0_offset_single = base_offset_single;
+    size_t test_uv0_offset_single_with_color = base_offset_single + test_color_stream;
+    
+    bool use_separated_streams = false;
+    bool use_single_index = false;  // Track if we need single index array
+    bool has_color_before_uv = false;  // Track if color stream comes before UV
+    bool uv_probes_failed = true;  // Start assuming UVs won't be found; set false if probe succeeds
+    size_t found_uv_offset = 0;    // Track the actual validated UV offset
+    bool uv_is_f32 = false;        // Track whether UVs are f32 instead of f16
+    
+    // Helper lambda to check if UVs look valid at an offset
+    // Sample across the stream to avoid false positives from random data
+    auto probe_uvs = [&](size_t offset, const char* label) -> bool {
+        if (offset + 8 > region.size()) {
+            LOG_DEBUG("XobParser", "UV probe " << label << " at " << offset << ": OUT OF BOUNDS");
+            return false;
+        }
+        
+        std::vector<uint32_t> samples;
+        if (vertex_count > 0) {
+            samples = {0u, 1u, 2u, 3u, 4u, 5u, 7u, 9u,
+                       vertex_count / 4u, vertex_count / 2u, (vertex_count * 3u) / 4u,
+                       vertex_count > 1 ? vertex_count - 1u : 0u};
+        }
+        
+        // Remove duplicates and out-of-range
+        std::sort(samples.begin(), samples.end());
+        samples.erase(std::unique(samples.begin(), samples.end()), samples.end());
+        
+        int valid_count = 0;
+        int nonzero_count = 0;
+        int checked = 0;
+        float max_abs = 0.0f;
+        for (uint32_t idx : samples) {
+            size_t off = offset + static_cast<size_t>(idx) * 4;
+            if (off + 4 > region.size()) continue;
+            float u = half_to_float(read_u16_le(region.data() + off));
+            float v = half_to_float(read_u16_le(region.data() + off + 2));
+            if (std::isfinite(u) && std::isfinite(v)) {
+                max_abs = std::max(max_abs, std::abs(u));
+                max_abs = std::max(max_abs, std::abs(v));
+                if (std::abs(u) > 1e-4f || std::abs(v) > 1e-4f) {
+                    nonzero_count++;
+                }
+                if (u >= -8.0f && u <= 8.0f && v >= -8.0f && v <= 8.0f) {
+                    valid_count++;
+                }
+            }
+            checked++;
+        }
+        
+        bool valid = (checked > 0) &&
+                     (valid_count >= std::max(3, checked * 6 / 10)) &&
+                     (nonzero_count >= 2) &&
+                     (max_abs <= 16.0f);
+        LOG_DEBUG("XobParser", "UV probe " << label << " at " << offset
+                  << ": " << valid_count << "/" << checked << " valid"
+                  << " nonzero=" << nonzero_count
+                  << " max_abs=" << max_abs
+                  << " -> " << (valid ? "VALID" : "INVALID"));
+        return valid;
+    };
+    
+    // Helper lambda to validate positions at a given offset
+    // Returns true if positions look valid (reasonable range, not denormalized)
+    auto validate_positions = [&](size_t test_offset, const char* label) -> bool {
+        if (test_offset + 48 > region.size()) {
+            LOG_DEBUG("XobParser", "Position probe " << label << " at " << test_offset << ": OUT OF BOUNDS");
+            return false;
+        }
+        const uint8_t* probe = region.data() + test_offset;
+        
+        // Check first 4 positions (48 bytes for 12-byte stride, 64 bytes for 16-byte)
+        int valid_count = 0;
+        size_t stride = (mesh_type == XOB_MESH_SKINNED || mesh_type == XOB_MESH_SKINNED_EMISSIVE) ? 16 : 12;
+        for (int i = 0; i < 4; i++) {
+            float x = read_f32_le(probe + i * stride);
+            float y = read_f32_le(probe + i * stride + 4);
+            float z = read_f32_le(probe + i * stride + 8);
+            
+            // Valid positions: reasonable range (±1000), not denormalized (>1e-6)
+            // Also reject infinities and NaNs
+            bool valid = std::isfinite(x) && std::isfinite(y) && std::isfinite(z) &&
+                         std::abs(x) < 1000.0f && std::abs(y) < 1000.0f && std::abs(z) < 1000.0f &&
+                         (std::abs(x) > 1e-6f || std::abs(y) > 1e-6f || std::abs(z) > 1e-6f);
+            if (valid) valid_count++;
+        }
+        
+        bool result = (valid_count >= 3);  // Need at least 3/4 valid
+        LOG_DEBUG("XobParser", "Position probe " << label << " at " << test_offset 
+                  << ": " << valid_count << "/4 valid -> " << (result ? "VALID" : "INVALID"));
+        return result;
+    };
+
+    // Try dual index with different layouts
+    if (probe_uvs(test_uv0_offset_dual, "DUAL")) {
+        use_separated_streams = true;
+        uv_probes_failed = false;
+        found_uv_offset = test_uv0_offset_dual;
+    }
+    else if (probe_uvs(test_uv0_offset_dual_with_color, "DUAL+COLOR")) {
+        use_separated_streams = true;
+        has_color_before_uv = true;
+        uv_probes_failed = false;
+        found_uv_offset = test_uv0_offset_dual_with_color;
+    }
+    // Try single index if dual didn't work
+    // BUT: validate that positions would be valid with single index layout
+    // The UV probe can give false positives when random data happens to look like half-floats
+    else if (probe_uvs(test_uv0_offset_single, "SINGLE")) {
+        // Validate positions at single index offset before accepting
+        if (validate_positions(single_idx_vertex_offset, "SINGLE_POS")) {
+            use_separated_streams = true;
+            use_single_index = true;
+            uv_probes_failed = false;
+            found_uv_offset = test_uv0_offset_single;
+            vertex_data_offset = single_idx_vertex_offset;
+            vertex_data_size = region.size() - vertex_data_offset;
+            LOG_DEBUG("XobParser", "Detected single index array layout, vertex_data_offset=" << vertex_data_offset);
+        } else {
+            LOG_DEBUG("XobParser", "SINGLE UV probe passed but positions invalid, rejecting");
+        }
+    }
+    else if (probe_uvs(test_uv0_offset_single_with_color, "SINGLE+COLOR")) {
+        // Validate positions at single index offset before accepting
+        if (validate_positions(single_idx_vertex_offset, "SINGLE+COLOR_POS")) {
+            use_separated_streams = true;
+            use_single_index = true;
+            has_color_before_uv = true;
+            uv_probes_failed = false;
+            found_uv_offset = test_uv0_offset_single_with_color;
+            vertex_data_offset = single_idx_vertex_offset;
+            vertex_data_size = region.size() - vertex_data_offset;
+            LOG_DEBUG("XobParser", "Detected single index array layout with color, vertex_data_offset=" << vertex_data_offset);
+        } else {
+            LOG_DEBUG("XobParser", "SINGLE+COLOR UV probe passed but positions invalid, rejecting");
+        }
+    }
+    
+    // Fallback logic when UV probes fail
+    // CRITICAL: Prefer SEPARATED with default UVs over INTERLEAVED for most meshes
+    // because INTERLEAVED parsing produces garbage for meshes that don't actually use it
+    if (!use_separated_streams) {
+        // Check 1: If positions at dual index offset look valid, use SEPARATED with zero UVs
+        if (validate_positions(vertex_data_offset, "FALLBACK_DUAL_POS")) {
+            use_separated_streams = true;
+            LOG_DEBUG("XobParser", "Fallback: positions valid at dual offset, using SEPARATED with default UVs");
+        }
+        // Check 2: Try single index offset positions
+        else if (validate_positions(single_idx_vertex_offset, "FALLBACK_SINGLE_POS")) {
+            use_separated_streams = true;
+            use_single_index = true;
+            vertex_data_offset = single_idx_vertex_offset;
+            vertex_data_size = region.size() - vertex_data_offset;
+            LOG_DEBUG("XobParser", "Fallback: positions valid at single offset, using SEPARATED with default UVs");
+        }
+        // Check 3: Ratio-based fallback - if data is very large, it's probably separated
+        else if (vertex_data_size > expected_with_uvs * 3) {
+            use_separated_streams = true;
+            LOG_DEBUG("XobParser", "Fallback: data ratio suggests SEPARATED streams");
+        }
+        // Check 4: For very small meshes (< 20 verts), try SEPARATED first if sizes work out
+        else if (vertex_count < 20 && vertex_data_size >= static_cast<size_t>(vertex_count) * 20) {
+            // Small meshes often have simple separated layout even without valid UVs
+            // Try separated and see if positions look reasonable
+            use_separated_streams = true;
+            LOG_DEBUG("XobParser", "Fallback: small mesh, trying SEPARATED layout");
+        }
+    }
+    
+    LOG_DEBUG("XobParser", "Layout detection: vertex_data_size=" << vertex_data_size 
+              << " min_interleaved=" << minimum_interleaved 
+              << " expected_with_uvs=" << expected_with_uvs
+              << " ratio=" << (float)vertex_data_size / expected_with_uvs);
+    
+    if (use_separated_streams) {
+        LOG_DEBUG("XobParser", "Using SEPARATED STREAMS layout");
+    } else {
+        LOG_DEBUG("XobParser", "Using INTERLEAVED layout (last resort)");
+    }
+    
+    // Calculate stream offsets for separated layout
+    // Layout depends on mesh type:
+    // - Non-skinned: [positions][normals][tangents][UV0][UV1][colors]
+    // - Skinned: Need to account for bone indices/weights before positions
+    size_t pos_stream_size = static_cast<size_t>(vertex_count) * 12;    // f32[3]
+    size_t norm_stream_size = static_cast<size_t>(vertex_count) * 4;    // u8[4]
+    size_t tangent_stream_size = static_cast<size_t>(vertex_count) * 4; // u8[4]
+    size_t uv_stream_size = static_cast<size_t>(vertex_count) * 4;      // f16[2]
+    
+    // For skinned meshes, there's extra data before positions
+    // Probe the data to find the actual position stream start
+    size_t pos_offset = vertex_data_offset;
+    
+    if (use_separated_streams && (mesh_type == XOB_MESH_SKINNED || mesh_type == XOB_MESH_SKINNED_EMISSIVE)) {
+        // For skinned meshes, the position stream doesn't start at vertex_data_offset
+        // There are bone indices and weights streams first
+        // 
+        // Try to find where positions actually start by scanning for valid float patterns
+        // A valid position float should be in reasonable range (e.g., -1000 to 1000)
+        
+        // Estimate: bone indices (4 bytes per vertex) + bone weights (16 bytes per vertex typical)
+        // But this varies. Let's calculate based on extra data size.
+        size_t base_streams_size = pos_stream_size + norm_stream_size + tangent_stream_size + 
+                                   uv_stream_size * 2 + static_cast<size_t>(vertex_count) * 4; // colors
+        size_t extra_data = vertex_data_size > base_streams_size ? (vertex_data_size - base_streams_size) : 0;
+        
+        // The extra data is bone weights/indices, which comes AFTER the standard streams in separated layout
+        // So positions should still start at vertex_data_offset
+        // BUT - some XOB files might have a different layout
+        
+        // Let's probe to verify: read first few floats and check if they look like positions
+        const uint8_t* probe = region.data() + vertex_data_offset;
+        float f0 = read_f32_le(probe);
+        float f1 = read_f32_le(probe + 4);
+        float f2 = read_f32_le(probe + 8);
+        float f3 = read_f32_le(probe + 12);
+        
+        LOG_DEBUG("XobParser", "Skinned mesh probe at vertex_data_offset: " 
+                  << f0 << ", " << f1 << ", " << f2 << ", " << f3);
+        
+        // If first vertex looks invalid (huge or denormalized), the layout might be different
+        bool first_looks_valid = (std::abs(f0) < 10000.0f && std::abs(f0) > 1e-10f) ||
+                                 (std::abs(f1) < 10000.0f && std::abs(f1) > 1e-10f) ||
+                                 (std::abs(f2) < 10000.0f && std::abs(f2) > 1e-10f);
+        
+        if (!first_looks_valid) {
+            // Try scanning forward to find where positions actually start
+            LOG_WARNING("XobParser", "Position stream may not start at expected offset, scanning...");
+            
+            // Search for a sequence of reasonable floats
+            for (size_t scan = 0; scan < std::min<size_t>(100000, vertex_data_size); scan += 4) {
+                const uint8_t* p = region.data() + vertex_data_offset + scan;
+                if (vertex_data_offset + scan + 12 > region.size()) break;
+                
+                float sf0 = read_f32_le(p);
+                float sf1 = read_f32_le(p + 4);
+                float sf2 = read_f32_le(p + 8);
+                
+                // Check if this looks like a valid position (all components in reasonable range)
+                bool valid = (std::abs(sf0) < 1000.0f && std::abs(sf0) > 1e-6f) &&
+                             (std::abs(sf1) < 1000.0f && std::abs(sf1) > 1e-6f) &&
+                             (std::abs(sf2) < 1000.0f && std::abs(sf2) > 1e-6f);
+                
+                if (valid) {
+                    // Verify next few vertices also look valid
+                    bool streak_valid = true;
+                    for (int check = 1; check < 5 && streak_valid; check++) {
+                        const uint8_t* cp = p + check * 12;
+                        if (vertex_data_offset + scan + check * 12 + 12 > region.size()) {
+                            streak_valid = false;
+                            break;
+                        }
+                        float cf0 = read_f32_le(cp);
+                        float cf1 = read_f32_le(cp + 4);
+                        float cf2 = read_f32_le(cp + 8);
+                        streak_valid = (std::abs(cf0) < 1000.0f) && (std::abs(cf1) < 1000.0f) && (std::abs(cf2) < 1000.0f);
+                    }
+                    
+                    if (streak_valid) {
+                        pos_offset = vertex_data_offset + scan;
+                        LOG_INFO("XobParser", "Found position stream at offset " << pos_offset 
+                                 << " (skip=" << scan << " bytes)");
+                        LOG_DEBUG("XobParser", "First position: " << sf0 << ", " << sf1 << ", " << sf2);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    // For skinned meshes, positions use 16 bytes (XYZW) not 12 (XYZ)
+    // This is because GPU skinning often requires vec4 alignment
+    bool skinned_16byte_pos = use_separated_streams && 
+                              (mesh_type == XOB_MESH_SKINNED || mesh_type == XOB_MESH_SKINNED_EMISSIVE);
+    
+    size_t actual_pos_stride = skinned_16byte_pos ? 16 : 12;
+    size_t actual_pos_stream_size = static_cast<size_t>(vertex_count) * actual_pos_stride;
+    
+    size_t norm_offset = pos_offset + actual_pos_stream_size;
+    size_t tangent_offset = norm_offset + norm_stream_size;
+    
+    // For skinned meshes, bone data streams come between tangent and UV
+    // Each bone stream is typically 16 bytes per vertex (4 weights + 4 indices)
+    // Layout: [tangent][bone_weights_0][bone_indices_0][bone_weights_1][bone_indices_1]...[UV0]
+    // For emissive meshes, there may be color data or other streams before UVs
+    size_t extra_data_size = 0;
+    
+    if (use_separated_streams) {
+        // If we detected color before UV in the probe, use that
+        if (has_color_before_uv) {
+            extra_data_size = static_cast<size_t>(vertex_count) * 4;  // Color stream
+            LOG_DEBUG("XobParser", "Color stream before UVs (detected by probe), size=" << extra_data_size);
+        }
+        
+        // Calculate expected extra data for skinned meshes
+        // CRITICAL: For skinned meshes, bone data goes BETWEEN tangent and UV streams
+        // Each bone stream consists of:
+        //   - 4 bone indices (4 bytes)
+        //   - 4 bone weights (16 bytes as f32[4])
+        // Total: 20 bytes per vertex per stream
+        // With 2 bone streams (common for skinned+emissive), that's 40 bytes/vertex
+        if (bone_streams > 0 && (mesh_type == XOB_MESH_SKINNED || mesh_type == XOB_MESH_SKINNED_EMISSIVE)) {
+            // bone_streams value: 1 = one set (20 bytes/vert), 2 = two sets (40 bytes/vert)
+            size_t bone_data = static_cast<size_t>(bone_streams) * 20 * vertex_count;
+            extra_data_size = bone_data;  // Reset, don't add - bone data is THE extra data
+            LOG_DEBUG("XobParser", "Skinned mesh: bone_streams=" << (int)bone_streams 
+                      << " bone_data=" << bone_data << " extra_data_size=" << extra_data_size);
+        }
+        
+        // For skinned meshes, validate UV location. If UVs look invalid, scan for them.
+        if (mesh_type == XOB_MESH_SKINNED || mesh_type == XOB_MESH_SKINNED_EMISSIVE) {
+            const uint8_t* probe_data = region.data();
+            size_t probe_start = tangent_offset + tangent_stream_size;
+            size_t max_extra = static_cast<size_t>(vertex_count) * 80;  // Allow wider bone data variations
+            size_t probe_end = std::min(probe_start + max_extra, region.size() - 32);
+            
+            auto uv_looks_valid_at = [&](size_t scan) -> bool {
+                if (scan + 32 > region.size()) return false;
+                int valid_count = 0;
+                int nonzero_count = 0;
+                float max_abs = 0.0f;
+                for (int i = 0; i < 8; i++) {
+                    uint16_t u_raw = read_u16_le(probe_data + scan + i * 4);
+                    uint16_t v_raw = read_u16_le(probe_data + scan + i * 4 + 2);
+                    float u = half_to_float(u_raw);
+                    float v = half_to_float(v_raw);
+                    if (std::isfinite(u) && std::isfinite(v)) {
+                        max_abs = std::max(max_abs, std::abs(u));
+                        max_abs = std::max(max_abs, std::abs(v));
+                        if (std::abs(u) > 1e-4f || std::abs(v) > 1e-4f) {
+                            nonzero_count++;
+                        }
+                        if (u >= -8.0f && u <= 8.0f && v >= -8.0f && v <= 8.0f) {
+                            valid_count++;
+                        }
+                    }
+                }
+                return valid_count >= 6 && nonzero_count >= 2 && max_abs <= 8.0f;
+            };
+            
+            bool found_uvs = false;
+            for (size_t scan = probe_start; scan < probe_end; scan += 4) {
+                if (uv_looks_valid_at(scan)) {
+                    extra_data_size = scan - probe_start;
+                    found_uv_offset = scan;  // Record the validated offset
+                    uv_probes_failed = false;  // Mark UVs as found
+                    LOG_DEBUG("XobParser", "Skinned UV probe found valid data at offset " << scan
+                              << " (skip=" << (scan - probe_start) << " after tangent)");
+                    found_uvs = true;
+                    break;
+                }
+            }
+            
+            if (!found_uvs) {
+                LOG_DEBUG("XobParser", "Skinned UV probe did not find valid UVs; will use default UVs");
+            }
+        }
+        
+        // For emissive (non-skinned), rely on layout detection (DUAL vs DUAL+COLOR) instead of
+        // scanning, which can lock onto false positives and misplace UV streams.
+    }
+    
+    // CRITICAL: For ANY mesh type where UV probes failed but we have valid positions,
+    // scan for a plausible UV stream (both f16 and f32). This avoids locking onto
+    // random data which produces huge UV ranges and flat colors.
+    if (uv_probes_failed && use_separated_streams) {
+        LOG_DEBUG("XobParser", "UV probes failed for mesh type 0x" << std::hex << (int)mesh_type 
+                  << std::dec << ", scanning for UV stream...");
+
+        const uint8_t* scan_data = region.data();
+        size_t scan_start = tangent_offset + tangent_stream_size;  // After known streams
+        size_t scan_limit = std::min(region.size(), scan_start + static_cast<size_t>(vertex_count) * 64);
+
+        struct UvCandidate {
+            size_t offset;
+            bool is_f32;
+            int valid;
+            int nonzero;
+            float max_abs;
+            float u_range;
+            float v_range;
+        };
+
+        auto score_candidate = [&](size_t offset, bool is_f32) -> UvCandidate {
+            size_t stream_size = static_cast<size_t>(vertex_count) * (is_f32 ? 8 : 4);
+            if (offset + stream_size > region.size()) {
+                return {offset, is_f32, 0, 0, 0.0f, 0.0f, 0.0f};
+            }
+
+            std::vector<uint32_t> samples;
+            samples.reserve(80);
+            // Fixed early samples
+            samples.insert(samples.end(), {0u, 1u, 2u, 3u, 4u, 5u, 7u, 9u, 16u, 32u, 64u, 128u});
+            // Evenly spaced samples across the whole stream
+            const uint32_t steps = 64;
+            for (uint32_t s = 0; s < steps; s++) {
+                uint32_t idx = (vertex_count > 0) ? (static_cast<uint64_t>(s) * (vertex_count - 1) / (steps - 1)) : 0u;
+                samples.push_back(idx);
+            }
+            samples.push_back(vertex_count > 1 ? vertex_count - 1u : 0u);
+            std::sort(samples.begin(), samples.end());
+            samples.erase(std::unique(samples.begin(), samples.end()), samples.end());
+
+            int valid = 0;
+            int nonzero = 0;
+            float max_abs = 0.0f;
+            float u_min = std::numeric_limits<float>::max();
+            float v_min = std::numeric_limits<float>::max();
+            float u_max = std::numeric_limits<float>::lowest();
+            float v_max = std::numeric_limits<float>::lowest();
+
+            for (uint32_t idx : samples) {
+                if (idx >= vertex_count) continue;
+                size_t off = offset + static_cast<size_t>(idx) * (is_f32 ? 8 : 4);
+                if (off + (is_f32 ? 8 : 4) > region.size()) continue;
+
+                float u = 0.0f;
+                float v = 0.0f;
+                if (is_f32) {
+                    u = read_f32_le(scan_data + off);
+                    v = read_f32_le(scan_data + off + 4);
+                } else {
+                    u = half_to_float(read_u16_le(scan_data + off));
+                    v = half_to_float(read_u16_le(scan_data + off + 2));
+                }
+
+                if (std::isfinite(u) && std::isfinite(v)) {
+                    max_abs = std::max(max_abs, std::abs(u));
+                    max_abs = std::max(max_abs, std::abs(v));
+                    u_min = std::min(u_min, u);
+                    v_min = std::min(v_min, v);
+                    u_max = std::max(u_max, u);
+                    v_max = std::max(v_max, v);
+                    if (std::abs(u) > 1e-4f || std::abs(v) > 1e-4f) nonzero++;
+                    if (u >= -4.0f && u <= 4.0f && v >= -4.0f && v <= 4.0f) valid++;
+                }
+            }
+
+            return {offset, is_f32, valid, nonzero, max_abs, u_max - u_min, v_max - v_min};
+        };
+
+        UvCandidate best{0, false, 0, 0, 0.0f, 0.0f, 0.0f};
+
+        // Scan for f16 UVs
+        for (size_t scan = scan_start; scan + 4 <= scan_limit; scan += 4) {
+            auto cand = score_candidate(scan, false);
+            if (cand.valid > best.valid || (cand.valid == best.valid && cand.nonzero > best.nonzero)) {
+                best = cand;
+            }
+        }
+
+        // Scan for f32 UVs
+        for (size_t scan = scan_start; scan + 8 <= scan_limit; scan += 8) {
+            auto cand = score_candidate(scan, true);
+            if (cand.valid > best.valid || (cand.valid == best.valid && cand.nonzero > best.nonzero)) {
+                best = cand;
+            }
+        }
+
+        // Accept only if the candidate looks sane
+        bool ranges_ok = (best.u_range > 0.01f || best.v_range > 0.01f);
+        bool abs_ok = (best.max_abs <= 4.0f);
+        bool counts_ok = (best.valid >= 12 && best.nonzero >= 6);
+
+        if (best.offset > 0 && ranges_ok && abs_ok && counts_ok) {
+            found_uv_offset = best.offset;
+            uv_is_f32 = best.is_f32;
+            uv_probes_failed = false;
+            LOG_INFO("XobParser", "UV SCAN: Found UV stream at offset " << best.offset
+                     << " format=" << (best.is_f32 ? "f32" : "f16")
+                     << " valid=" << best.valid << " nonzero=" << best.nonzero
+                     << " max_abs=" << best.max_abs
+                     << " range(u,v)=('" << best.u_range << "','" << best.v_range << "')");
+        } else {
+            LOG_WARNING("XobParser", "UV SCAN: No reliable UV stream found, using default UVs");
+        }
+    }
+    
+    // Calculate UV offset based on probe/scan results
+    size_t uv0_offset;
+    if (!uv_probes_failed && found_uv_offset > 0) {
+        // Use the validated UV offset from probing or scanning
+        uv0_offset = found_uv_offset;
+        LOG_DEBUG("XobParser", "Using validated UV offset: " << uv0_offset);
+    } else {
+        // Fallback: calculate from stream layout (may be wrong for complex meshes)
+        uv0_offset = tangent_offset + tangent_stream_size + extra_data_size;
+        if (uv_probes_failed) {
+            LOG_DEBUG("XobParser", "UVs not validated, calculated offset: " << uv0_offset << " (will use default UVs)");
+        }
+    }
+    size_t uv1_offset = uv0_offset + uv_stream_size;
+    size_t color_offset = uv1_offset + uv_stream_size;
+    
+    if (use_separated_streams) {
+        LOG_DEBUG("XobParser", "Stream offsets: pos=" << pos_offset << " (stride=" << actual_pos_stride << ")"
+                  << " norm=" << norm_offset << " tan=" << tangent_offset
+                  << " uv0=" << uv0_offset << " uv1=" << uv1_offset);
+    }
+    
+    // Extract vertices
     mesh.vertices.clear();
     mesh.vertices.reserve(vertex_count);
     
+    const uint8_t* data = region.data();
+    
     for (uint32_t i = 0; i < vertex_count; i++) {
-        size_t off = pos_offset + i * position_stride;
-        if (off + 12 > region.size()) {
-            // Pad remaining vertices
-            XobVertex vert;
-            vert.position = glm::vec3(0.0f);
-            vert.normal = glm::vec3(0.0f, 0.0f, 1.0f);
-            vert.uv = glm::vec2(0.0f);
-            mesh.vertices.push_back(vert);
-            continue;
+        XobVertex vert;
+        
+        if (use_separated_streams) {
+            // SEPARATED STREAMS: Each attribute type is in its own contiguous array
+            
+            // Position (12 or 16 bytes per vertex depending on skinned)
+            size_t p_off = pos_offset + i * actual_pos_stride;
+            if (p_off + 12 <= region.size()) {
+                vert.position.x = read_f32_le(data + p_off);
+                vert.position.y = read_f32_le(data + p_off + 4);
+                vert.position.z = read_f32_le(data + p_off + 8);
+                // W component (if 16-byte) is ignored - it's just padding
+            }
+            
+            // Normal (4 bytes per vertex)
+            size_t n_off = norm_offset + i * 4;
+            if (n_off + 4 <= region.size()) {
+                int8_t nx = static_cast<int8_t>(data[n_off]);
+                int8_t ny = static_cast<int8_t>(data[n_off + 1]);
+                int8_t nz = static_cast<int8_t>(data[n_off + 2]);
+                
+                vert.normal = glm::vec3(
+                    static_cast<float>(nx) / 127.0f,
+                    static_cast<float>(ny) / 127.0f,
+                    static_cast<float>(nz) / 127.0f
+                );
+                float len = glm::length(vert.normal);
+                if (len > 0.001f) vert.normal /= len;
+                else vert.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+            } else {
+                vert.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+            }
+            
+            // Tangent (4 bytes per vertex)
+            size_t t_off = tangent_offset + i * 4;
+            if (t_off + 4 <= region.size()) {
+                int8_t tx = static_cast<int8_t>(data[t_off]);
+                int8_t ty = static_cast<int8_t>(data[t_off + 1]);
+                int8_t tz = static_cast<int8_t>(data[t_off + 2]);
+                int8_t tw = static_cast<int8_t>(data[t_off + 3]);
+                
+                vert.tangent = glm::vec3(
+                    static_cast<float>(tx) / 127.0f,
+                    static_cast<float>(ty) / 127.0f,
+                    static_cast<float>(tz) / 127.0f
+                );
+                float len = glm::length(vert.tangent);
+                if (len > 0.001f) vert.tangent /= len;
+                else vert.tangent = glm::vec3(1.0f, 0.0f, 0.0f);
+                
+                vert.tangent_sign = (tw >= 0) ? 1.0f : -1.0f;
+            }
+            
+            // UV0 (4 bytes per vertex as half-floats)
+            // CRITICAL: Only read UVs if we have a validated offset, otherwise use defaults
+            if (has_embedded_uvs) {
+                if (!uv_probes_failed) {
+                    // UVs were validated - read from the data
+                    if (uv_is_f32) {
+                        size_t uv_off = uv0_offset + i * 8;
+                        if (uv_off + 8 <= region.size()) {
+                            float u = read_f32_le(data + uv_off);
+                            float v = read_f32_le(data + uv_off + 4);
+                            vert.uv.x = u;
+                            vert.uv.y = 1.0f - v;  // Flip V for OpenGL
+                            if (i < 3) {
+                                LOG_DEBUG("XobParser", "UV[" << i << "]: f32 -> (" << vert.uv.x << "," << vert.uv.y << ")");
+                            }
+                        }
+                    } else {
+                        size_t uv_off = uv0_offset + i * 4;
+                        if (uv_off + 4 <= region.size()) {
+                            uint16_t u_raw = read_u16_le(data + uv_off);
+                            uint16_t v_raw = read_u16_le(data + uv_off + 2);
+                            
+                            float u = half_to_float(u_raw);
+                            float v = half_to_float(v_raw);
+                            
+                            vert.uv.x = u;
+                            vert.uv.y = 1.0f - v;  // Flip V for OpenGL
+                            
+                            if (i < 3) {
+                                LOG_DEBUG("XobParser", "UV[" << i << "]: raw=(0x" << std::hex << u_raw 
+                                          << ",0x" << v_raw << std::dec << ") -> (" << vert.uv.x << "," << vert.uv.y << ")");
+                            }
+                        }
+                    }
+                } else {
+                    // UV probes failed - use default UVs (planar projection from position)
+                    // This gives reasonable texture mapping for debugging/fallback
+                    vert.uv.x = (vert.position.x + 5.0f) * 0.1f;  // Rough planar UV
+                    vert.uv.y = (vert.position.z + 5.0f) * 0.1f;
+                    
+                    if (i < 3) {
+                        LOG_DEBUG("XobParser", "UV[" << i << "]: DEFAULT from pos -> (" 
+                                  << vert.uv.x << "," << vert.uv.y << ")");
+                    }
+                }
+            }
+            
+        } else {
+            // INTERLEAVED: All attributes for each vertex are contiguous
+            size_t off = vertex_data_offset + i * vertex_stride;
+            if (off + 12 > region.size()) {
+                vert.position = glm::vec3(0.0f);
+                vert.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+                vert.uv = glm::vec2(0.0f);
+                mesh.vertices.push_back(vert);
+                continue;
+            }
+            
+            size_t attr_off = off;
+            
+            // Position (12 bytes)
+            vert.position.x = read_f32_le(data + attr_off);
+            vert.position.y = read_f32_le(data + attr_off + 4);
+            vert.position.z = read_f32_le(data + attr_off + 8);
+            attr_off += 12;
+            
+            // Normal (4 bytes packed)
+            if (attr_off + 4 <= region.size()) {
+                int8_t nx = static_cast<int8_t>(data[attr_off]);
+                int8_t ny = static_cast<int8_t>(data[attr_off + 1]);
+                int8_t nz = static_cast<int8_t>(data[attr_off + 2]);
+                
+                vert.normal = glm::vec3(
+                    static_cast<float>(nx) / 127.0f,
+                    static_cast<float>(ny) / 127.0f,
+                    static_cast<float>(nz) / 127.0f
+                );
+                float len = glm::length(vert.normal);
+                if (len > 0.001f) vert.normal /= len;
+                else vert.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+                
+                attr_off += 4;
+            } else {
+                vert.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+            }
+            
+            // Tangent (4 bytes packed)
+            if (attr_off + 4 <= region.size()) {
+                int8_t tx = static_cast<int8_t>(data[attr_off]);
+                int8_t ty = static_cast<int8_t>(data[attr_off + 1]);
+                int8_t tz = static_cast<int8_t>(data[attr_off + 2]);
+                int8_t tw = static_cast<int8_t>(data[attr_off + 3]);
+                
+                vert.tangent = glm::vec3(
+                    static_cast<float>(tx) / 127.0f,
+                    static_cast<float>(ty) / 127.0f,
+                    static_cast<float>(tz) / 127.0f
+                );
+                float len = glm::length(vert.tangent);
+                if (len > 0.001f) vert.tangent /= len;
+                else vert.tangent = glm::vec3(1.0f, 0.0f, 0.0f);
+                
+                vert.tangent_sign = (tw >= 0) ? 1.0f : -1.0f;
+                attr_off += 4;
+            }
+            
+            // UV0 (4 bytes as half-floats) - embedded in emissive meshes
+            if (has_embedded_uvs && attr_off + 4 <= region.size()) {
+                uint16_t u_raw = read_u16_le(data + attr_off);
+                uint16_t v_raw = read_u16_le(data + attr_off + 2);
+                
+                float u = half_to_float(u_raw);
+                float v = half_to_float(v_raw);
+                
+                vert.uv.x = u;
+                vert.uv.y = 1.0f - v;  // Flip V for OpenGL
+                attr_off += 4;
+                
+                if (i < 3) {
+                    LOG_DEBUG("XobParser", "UV[" << i << "]: raw=(0x" << std::hex << u_raw 
+                              << ",0x" << v_raw << std::dec << ") -> (" << vert.uv.x << "," << vert.uv.y << ")");
+                }
+            }
         }
         
-        XobVertex vert;
-        vert.position.x = read_f32_le(region.data() + off);
-        vert.position.y = read_f32_le(region.data() + off + 4);
-        vert.position.z = read_f32_le(region.data() + off + 8);
-        vert.normal = glm::vec3(0.0f, 0.0f, 1.0f);  // Default normal (will be overwritten if has_normals)
-        vert.uv = glm::vec2(0.0f);
         mesh.vertices.push_back(vert);
     }
     
-    // Track current offset in the vertex attribute stream (after positions)
-    size_t attr_offset = pos_offset + vertex_count * position_stride;
-    
-    // Normals (4 bytes per vertex - 10-10-10-2 packed format) - OPTIONAL
-    // Format: 10 bits X, 10 bits Y, 10 bits Z, 2 bits W (unused/sign)
-    // Each 10-bit value is signed: range -512 to 511, normalized by 511
-    if (has_normals) {
-        size_t normal_offset = attr_offset;
-        std::cerr << "[XOB] normal_offset=" << normal_offset << "\n";
-        
-        for (uint32_t i = 0; i < vertex_count && i < mesh.vertices.size(); i++) {
-            size_t off = normal_offset + i * XOB_NORMAL_SIZE;
-            if (off + XOB_NORMAL_SIZE > region.size()) break;
-            
-            // Read packed 32-bit normal
-            uint32_t packed = read_u32_le(region.data() + off);
-            
-            // Extract 10-bit signed components
-            int32_t nx_raw = packed & 0x3FF;           // Bits 0-9
-            int32_t ny_raw = (packed >> 10) & 0x3FF;  // Bits 10-19
-            int32_t nz_raw = (packed >> 20) & 0x3FF;  // Bits 20-29
-            // int32_t nw = (packed >> 30) & 0x3;     // Bits 30-31 (unused)
-            
-            // Convert from 10-bit unsigned to signed (-512 to 511)
-            if (nx_raw >= 512) nx_raw -= 1024;
-            if (ny_raw >= 512) ny_raw -= 1024;
-            if (nz_raw >= 512) nz_raw -= 1024;
-            
-            // Normalize to -1.0 to 1.0 range
-            glm::vec3 normal(
-                static_cast<float>(nx_raw) / 511.0f,
-                static_cast<float>(ny_raw) / 511.0f,
-                static_cast<float>(nz_raw) / 511.0f
-            );
-            
-            // Normalize the normal vector (should already be close to unit length)
-            float len = glm::length(normal);
-            if (len > 0.001f) {
-                normal /= len;
-            } else {
-                normal = glm::vec3(0.0f, 1.0f, 0.0f);  // Default up
-            }
-            
-            mesh.vertices[i].normal = normal;
-        }
-        attr_offset += vertex_count * XOB_NORMAL_SIZE;
-    } else {
-        std::cerr << "[XOB] No normals flag - using default normals\n";
+    // Debug: print first few vertices
+    for (size_t i = 0; i < std::min<size_t>(3, mesh.vertices.size()); i++) {
+        const auto& v = mesh.vertices[i];
+        LOG_DEBUG("XobParser", "Vert[" << i << "]: pos=(" << v.position.x << "," 
+                  << v.position.y << "," << v.position.z << ") uv=(" 
+                  << v.uv.x << "," << v.uv.y << ")");
     }
     
-    // UVs - stride depends on format flag
-    // 0x04 flag (has_uvs) indicates COMPACT 4-byte UVs (single UV channel)
-    // When 0x04 is NOT set, UVs are 8 bytes (UV0 + UV1/padding)
-    const size_t uv_stride = has_uvs ? 4 : 8;
-    
-    {
-        size_t uv_offset = attr_offset;
-        std::cerr << "[XOB] uv_offset=" << uv_offset << " uv_stride=" << uv_stride 
-                  << " region_size=" << region.size() << "\n";
+    // Debug: dump first few TRIANGLES to verify index buffer correctness
+    LOG_DEBUG("XobParser", "First 5 triangles (checking index->vertex mapping):");
+    for (size_t tri = 0; tri < std::min<size_t>(5, mesh.indices.size() / 3); tri++) {
+        uint32_t i0 = mesh.indices[tri * 3 + 0];
+        uint32_t i1 = mesh.indices[tri * 3 + 1];
+        uint32_t i2 = mesh.indices[tri * 3 + 2];
         
-        size_t valid_uvs = 0;
-        for (uint32_t i = 0; i < vertex_count && i < mesh.vertices.size(); i++) {
-            size_t off = uv_offset + i * uv_stride;
-            if (off + 4 > region.size()) break;  // Only need 4 bytes for UV0
-            
-            uint16_t u_raw = read_u16_le(region.data() + off);
-            uint16_t v_raw = read_u16_le(region.data() + off + 2);
-            
-            // UVs are stored as IEEE 754 half-precision floats (16 bits each)
-            // Use half_to_float() to convert properly
-            float u = half_to_float(u_raw);
-            float v = half_to_float(v_raw);
-            
-            // Clamp to valid range (half-float can represent values outside 0-1)
-            // Some UVs may be tiled so allow values outside 0-1
-            
-            mesh.vertices[i].uv.x = u;
-            mesh.vertices[i].uv.y = 1.0f - v;  // Flip V for OpenGL convention
-            valid_uvs++;
-            
-            // Debug first few raw values
-            if (i < 5) {
-                std::cerr << "[XOB] UV[" << i << "] half: u=0x" << std::hex << u_raw << " v=0x" << v_raw << std::dec
-                          << " -> (" << mesh.vertices[i].uv.x << ", " << mesh.vertices[i].uv.y << ")\n";
-            }
-        }
-        std::cerr << "[XOB] Parsed " << valid_uvs << " UVs as half-float (stride=" << uv_stride << ")\n";
-        attr_offset += vertex_count * uv_stride;
+        const auto& v0 = mesh.vertices[std::min<uint32_t>(i0, mesh.vertices.size() - 1)];
+        const auto& v1 = mesh.vertices[std::min<uint32_t>(i1, mesh.vertices.size() - 1)];
+        const auto& v2 = mesh.vertices[std::min<uint32_t>(i2, mesh.vertices.size() - 1)];
+        
+        // Calculate triangle edge lengths to check if it's degenerate
+        float e0 = glm::length(v1.position - v0.position);
+        float e1 = glm::length(v2.position - v1.position);
+        float e2 = glm::length(v0.position - v2.position);
+        float max_edge = std::max({e0, e1, e2});
+        
+        LOG_DEBUG("XobParser", "  Tri " << tri << ": idx=[" << i0 << "," << i1 << "," << i2 << "]"
+                  << " edges=[" << e0 << "," << e1 << "," << e2 << "]"
+                  << " max_edge=" << max_edge
+                  << (max_edge > 10.0f ? " HUGE!" : ""));
     }
     
-    // Tangents (4 bytes per vertex) - packed similar to normals
-    // Format: 3 signed bytes for tangent direction + 1 byte for handedness sign
-    if (has_tangents) {
-        size_t tangent_offset = attr_offset;
-        std::cerr << "[XOB] Parsing tangents at offset " << tangent_offset << "\n";
-        
-        for (uint32_t i = 0; i < vertex_count && i < mesh.vertices.size(); i++) {
-            size_t off = tangent_offset + i * XOB_TANGENT_SIZE;
-            if (off + XOB_TANGENT_SIZE > region.size()) break;
-            
-            int8_t tx = static_cast<int8_t>(region[off]);
-            int8_t ty = static_cast<int8_t>(region[off + 1]);
-            int8_t tz = static_cast<int8_t>(region[off + 2]);
-            int8_t tw = static_cast<int8_t>(region[off + 3]);  // Handedness (sign for bitangent)
-            
-            glm::vec3 tangent(
-                static_cast<float>(tx) / 127.0f,
-                static_cast<float>(ty) / 127.0f,
-                static_cast<float>(tz) / 127.0f
-            );
-            
-            // Normalize tangent
-            float len = glm::length(tangent);
-            if (len > 0.001f) {
-                tangent /= len;
-            } else {
-                tangent = glm::vec3(1.0f, 0.0f, 0.0f);  // Default tangent
-            }
-            
-            mesh.vertices[i].tangent = tangent;
-            mesh.vertices[i].tangent_sign = (tw >= 0) ? 1.0f : -1.0f;
-        }
-        attr_offset += vertex_count * XOB_TANGENT_SIZE;
-        std::cerr << "[XOB] Parsed " << vertex_count << " tangents\n";
-    }
-    
-    // Skinning data (8 bytes per vertex)
-    // Format: 4 bone indices (u8) + 4 bone weights (u8 normalized to 0-1)
-    constexpr size_t SKINNING_SIZE = 8;
-    if (has_skinning) {
-        size_t skinning_offset = attr_offset;
-        std::cerr << "[XOB] Parsing skinning data at offset " << skinning_offset << "\n";
-        
-        for (uint32_t i = 0; i < vertex_count && i < mesh.vertices.size(); i++) {
-            size_t off = skinning_offset + i * SKINNING_SIZE;
-            if (off + SKINNING_SIZE > region.size()) break;
-            
-            // Bone indices (4 bytes)
-            mesh.vertices[i].bone_indices.x = region[off];
-            mesh.vertices[i].bone_indices.y = region[off + 1];
-            mesh.vertices[i].bone_indices.z = region[off + 2];
-            mesh.vertices[i].bone_indices.w = region[off + 3];
-            
-            // Bone weights (4 bytes, normalized u8 -> 0.0-1.0)
-            mesh.vertices[i].bone_weights.x = static_cast<float>(region[off + 4]) / 255.0f;
-            mesh.vertices[i].bone_weights.y = static_cast<float>(region[off + 5]) / 255.0f;
-            mesh.vertices[i].bone_weights.z = static_cast<float>(region[off + 6]) / 255.0f;
-            mesh.vertices[i].bone_weights.w = static_cast<float>(region[off + 7]) / 255.0f;
-            
-            // Debug first vertex's skinning data
-            if (i == 0) {
-                std::cerr << "[XOB] Skinning[0]: bones=(" 
-                          << mesh.vertices[i].bone_indices.x << "," 
-                          << mesh.vertices[i].bone_indices.y << ","
-                          << mesh.vertices[i].bone_indices.z << ","
-                          << mesh.vertices[i].bone_indices.w << ") weights=("
-                          << mesh.vertices[i].bone_weights.x << ","
-                          << mesh.vertices[i].bone_weights.y << ","
-                          << mesh.vertices[i].bone_weights.z << ","
-                          << mesh.vertices[i].bone_weights.w << ")\n";
-            }
-        }
-        attr_offset += vertex_count * SKINNING_SIZE;
-        std::cerr << "[XOB] Parsed " << vertex_count << " skinning records\n";
-    }
-    
-    // Extra normal data (8 bytes per vertex)
-    // Format: secondary normal (4 bytes) + secondary tangent (4 bytes)
-    if (has_extra_normals) {
-        size_t extra_offset = attr_offset;
-        std::cerr << "[XOB] Parsing extra normals at offset " << extra_offset << "\n";
-        
-        for (uint32_t i = 0; i < vertex_count && i < mesh.vertices.size(); i++) {
-            size_t off = extra_offset + i * XOB_EXTRA_SIZE;
-            if (off + XOB_EXTRA_SIZE > region.size()) break;
-            
-            // Extra normal (first 4 bytes)
-            int8_t enx = static_cast<int8_t>(region[off]);
-            int8_t eny = static_cast<int8_t>(region[off + 1]);
-            int8_t enz = static_cast<int8_t>(region[off + 2]);
-            // byte 3 is padding or sign
-            
-            glm::vec3 extra_normal(
-                static_cast<float>(enx) / 127.0f,
-                static_cast<float>(eny) / 127.0f,
-                static_cast<float>(enz) / 127.0f
-            );
-            float len = glm::length(extra_normal);
-            if (len > 0.001f) extra_normal /= len;
-            else extra_normal = glm::vec3(0.0f, 1.0f, 0.0f);
-            mesh.vertices[i].extra_normal = extra_normal;
-            
-            // Extra tangent (second 4 bytes)
-            int8_t etx = static_cast<int8_t>(region[off + 4]);
-            int8_t ety = static_cast<int8_t>(region[off + 5]);
-            int8_t etz = static_cast<int8_t>(region[off + 6]);
-            // byte 7 is padding or sign
-            
-            glm::vec3 extra_tangent(
-                static_cast<float>(etx) / 127.0f,
-                static_cast<float>(ety) / 127.0f,
-                static_cast<float>(etz) / 127.0f
-            );
-            len = glm::length(extra_tangent);
-            if (len > 0.001f) extra_tangent /= len;
-            else extra_tangent = glm::vec3(1.0f, 0.0f, 0.0f);
-            mesh.vertices[i].extra_tangent = extra_tangent;
-        }
-        attr_offset += vertex_count * XOB_EXTRA_SIZE;
-        std::cerr << "[XOB] Parsed " << vertex_count << " extra normal records\n";
-    }
-    
-    std::cerr << "[XOB] Final attr_offset=" << attr_offset << " region_size=" << region.size() << "\n";
+    LOG_INFO("XobParser", "Parsed " << mesh.vertices.size() << " vertices, " 
+             << mesh.indices.size() << " indices");
     
     return !mesh.vertices.empty() && !mesh.indices.empty();
 }
@@ -924,13 +1656,187 @@ static std::vector<XobMaterial> extract_materials_from_head(const uint8_t* data,
  * - Material 0's index count = total_indices - sum(all other materials)
  * - When material 0 HAS markers, they represent render passes/LODs, NOT additional geometry
  * - For each material > 0, use the FIRST marker's index_count encountered
+ *
+ * SIMPLIFIED (v8): Use submesh_index from LZO4 descriptors when available.
+ * Each descriptor at +0x52 has the material index for that submesh.
+ */
+static std::vector<MaterialRange> extract_material_ranges_from_descriptors(
+    const std::vector<LzoDescriptor>& descriptors,
+    uint32_t target_lod,
+    uint32_t total_triangles,
+    size_t num_materials) 
+{
+    std::vector<MaterialRange> result;
+    
+    LOG_DEBUG("XobParser", "Extracting material ranges from descriptors: " 
+              << descriptors.size() << " descriptors, " << total_triangles << " tris, " 
+              << num_materials << " materials, target_lod=" << target_lod);
+    
+    // Simple case: single material or no materials
+    if (num_materials <= 1 || descriptors.empty()) {
+        MaterialRange r0;
+        r0.material_index = 0;
+        r0.triangle_start = 0;
+        r0.triangle_end = total_triangles;
+        r0.triangle_count = total_triangles;
+        result.push_back(r0);
+        LOG_DEBUG("XobParser", "Single material: all " << total_triangles << " triangles to mat 0");
+        return result;
+    }
+    
+    // Check if we have multiple submeshes (same LOD, different materials)
+    // Group descriptors by LOD level
+    std::map<uint32_t, std::vector<size_t>> lod_to_descriptors;
+    for (size_t i = 0; i < descriptors.size(); i++) {
+        // Use quality_tier as LOD index (lower = higher detail)
+        uint32_t lod = descriptors[i].quality_tier;
+        lod_to_descriptors[lod].push_back(i);
+    }
+    
+    // Find descriptors at target LOD
+    std::vector<size_t> target_descriptors;
+    if (lod_to_descriptors.find(target_lod) != lod_to_descriptors.end()) {
+        target_descriptors = lod_to_descriptors[target_lod];
+    } else if (!lod_to_descriptors.empty()) {
+        // Fallback to first available LOD
+        target_descriptors = lod_to_descriptors.begin()->second;
+    }
+    
+    if (target_descriptors.empty()) {
+        // No descriptors for target LOD, use first descriptor's submesh_index
+        if (!descriptors.empty()) {
+            uint32_t mat_idx = descriptors[0].submesh_index;
+            if (mat_idx >= num_materials) mat_idx = 0;
+            
+            MaterialRange r;
+            r.material_index = mat_idx;
+            r.triangle_start = 0;
+            r.triangle_end = total_triangles;
+            r.triangle_count = total_triangles;
+            result.push_back(r);
+        } else {
+            MaterialRange r0;
+            r0.material_index = 0;
+            r0.triangle_start = 0;
+            r0.triangle_end = total_triangles;
+            r0.triangle_count = total_triangles;
+            result.push_back(r0);
+        }
+        return result;
+    }
+    
+    // Single descriptor at target LOD - all triangles go to its submesh_index
+    if (target_descriptors.size() == 1) {
+        const auto& desc = descriptors[target_descriptors[0]];
+        uint32_t mat_idx = desc.submesh_index;
+        if (mat_idx >= num_materials) mat_idx = 0;
+        
+        MaterialRange r;
+        r.material_index = mat_idx;
+        r.triangle_start = 0;
+        r.triangle_end = total_triangles;
+        r.triangle_count = total_triangles;
+        result.push_back(r);
+        
+        LOG_DEBUG("XobParser", "Single submesh at LOD " << target_lod 
+                  << ": all " << total_triangles << " triangles to mat " << mat_idx);
+        return result;
+    }
+    
+    // Multiple descriptors at same LOD - build ranges from each
+    // Sort by submesh_index to ensure consistent ordering
+    std::vector<std::pair<uint32_t, uint32_t>> submesh_ranges; // (submesh_index, triangle_count)
+    for (size_t idx : target_descriptors) {
+        const auto& desc = descriptors[idx];
+        uint32_t mat_idx = desc.submesh_index;
+        if (mat_idx >= num_materials) mat_idx = 0;
+        submesh_ranges.push_back({mat_idx, desc.triangle_count});
+    }
+    
+    // Sort by material index (index buffer is typically organized by material order)
+    std::sort(submesh_ranges.begin(), submesh_ranges.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    
+    // Build ranges
+    uint32_t current_tri = 0;
+    for (const auto& [mat_idx, tri_count] : submesh_ranges) {
+        if (tri_count == 0) continue;
+        if (current_tri >= total_triangles) break;
+        
+        uint32_t actual_count = std::min(tri_count, total_triangles - current_tri);
+        
+        MaterialRange r;
+        r.material_index = mat_idx;
+        r.triangle_start = current_tri;
+        r.triangle_end = current_tri + actual_count;
+        r.triangle_count = actual_count;
+        result.push_back(r);
+        
+        LOG_DEBUG("XobParser", "Submesh " << mat_idx << ": triangles " 
+                  << current_tri << "-" << (current_tri + actual_count));
+        
+        current_tri += actual_count;
+    }
+    
+    // If we didn't cover all triangles, add remaining to material 0
+    if (current_tri < total_triangles) {
+        uint32_t remaining = total_triangles - current_tri;
+        
+        // Check if mat 0 already has a range
+        bool found_mat0 = false;
+        for (auto& r : result) {
+            if (r.material_index == 0) {
+                // Extend mat 0's range
+                r.triangle_end = total_triangles;
+                r.triangle_count += remaining;
+                found_mat0 = true;
+                break;
+            }
+        }
+        
+        if (!found_mat0) {
+            MaterialRange r;
+            r.material_index = 0;
+            r.triangle_start = current_tri;
+            r.triangle_end = total_triangles;
+            r.triangle_count = remaining;
+            result.push_back(r);
+        }
+        
+        LOG_DEBUG("XobParser", "Added remaining " << remaining << " triangles to mat 0");
+    }
+    
+    // Fallback if still empty
+    if (result.empty()) {
+        MaterialRange r0;
+        r0.material_index = 0;
+        r0.triangle_start = 0;
+        r0.triangle_end = total_triangles;
+        r0.triangle_count = total_triangles;
+        result.push_back(r0);
+    }
+    
+    LOG_DEBUG("XobParser", "Material ranges from descriptors: " << result.size());
+    for (const auto& r : result) {
+        LOG_DEBUG("XobParser", "  mat=" << r.material_index << " tris=" << r.triangle_start 
+                  << "-" << r.triangle_end << " (count=" << r.triangle_count << ")");
+    }
+    
+    return result;
+}
+
+/**
+ * Legacy material range extraction from submesh blocks after LZO4 descriptors
+ * Falls back to this if descriptor-based extraction fails
  */
 static std::vector<MaterialRange> extract_material_ranges(const uint8_t* data, size_t size, 
                                                           uint32_t total_triangles, 
-                                                          size_t num_materials) {
+                                                          size_t num_materials,
+                                                          uint8_t mesh_type = 0x0F) {
     std::vector<MaterialRange> result;
     
-    LOG_DEBUG("XobParser", "Extracting material ranges: " << total_triangles << " tris, " << num_materials << " materials");
+    LOG_DEBUG("XobParser", "Extracting material ranges: " << total_triangles << " tris, " 
+              << num_materials << " materials, mesh_type=0x" << std::hex << (int)mesh_type << std::dec);
     
     uint32_t total_indices = total_triangles * 3;
     
@@ -976,7 +1882,15 @@ static std::vector<MaterialRange> extract_material_ranges(const uint8_t* data, s
     }
     
     // Data after all LZO4 descriptors contains submesh blocks
-    size_t after_start = lzo4_positions[0] + (116 * lzo4_positions.size());
+    // Find the actual end of all LZO4 descriptors (they may not be consecutive!)
+    size_t after_start = 0;
+    for (size_t pos : lzo4_positions) {
+        size_t desc_end = pos + 116;
+        if (desc_end > after_start) {
+            after_start = desc_end;
+        }
+    }
+    
     if (after_start >= head_size) {
         // No submesh data - single material mesh
         MaterialRange r0;
@@ -993,54 +1907,116 @@ static std::vector<MaterialRange> extract_material_ranges(const uint8_t* data, s
     
     LOG_DEBUG("XobParser", "Submesh data: " << after_size << " bytes after LZO4 descriptors");
     
-    // Dump raw submesh data for analysis
+    // Dump raw submesh data for analysis - more bytes this time
     std::ostringstream raw_hex;
-    raw_hex << "Submesh raw (first 128 bytes): ";
-    for (size_t i = 0; i < std::min<size_t>(128, after_size); i++) {
+    raw_hex << "Submesh raw (first 256 bytes):\n";
+    for (size_t i = 0; i < std::min<size_t>(256, after_size); i++) {
+        if (i % 16 == 0) raw_hex << "  " << std::setw(4) << std::setfill('0') << std::hex << i << ": ";
         raw_hex << std::hex << std::setw(2) << std::setfill('0') << (int)after[i] << " ";
-        if ((i + 1) % 16 == 0) raw_hex << "| ";
+        if ((i + 1) % 16 == 0) raw_hex << "\n";
     }
     LOG_DEBUG("XobParser", raw_hex.str());
     
-    // Map to store material info: first entry has start position, count
-    // Structure appears to be: [...][idx_count:u16][lod:u16][0][FFFF][mat_idx:u16][flags:u16]
-    // But we might also have: idx_start somewhere before
+    // Submesh block structure analysis
+    // Each block is ~104 bytes, ending with FFFF marker
+    // Need to dump full block content to understand structure
     struct SubmeshEntry {
+        size_t position;        // Position in submesh data
         uint32_t material_index;
-        uint32_t index_start;   // NEW: try to find this
-        uint32_t index_count;
-        uint16_t lod_index;
-        uint16_t flags;
+        uint32_t index_start;   // Value at pos-8
+        uint32_t index_count;   // Value at pos-6
+        uint16_t lod_index;     // Value at pos-4
+        uint16_t flags;         // Value at pos+4
+        uint16_t order_key;     // Value at pos-10 (tail hint)
     };
     std::vector<SubmeshEntry> submesh_entries;
     
-    // Scan for 0xFFFF markers and extract ALL surrounding data
-    for (size_t pos = 6; pos + 6 <= after_size; pos++) {
+    // Scan for 0xFFFF markers and extract block data with FULL context
+    int block_num = 0;
+    for (size_t pos = 8; pos + 6 <= after_size; pos++) {
         if (after[pos] == 0xFF && after[pos+1] == 0xFF) {
             SubmeshEntry entry;
+            entry.position = pos;
             entry.material_index = read_u16_le(after + pos + 2);
             entry.flags = read_u16_le(after + pos + 4);
-            
-            // Data before FFFF marker
             entry.index_count = read_u16_le(after + pos - 6);
             entry.lod_index = read_u16_le(after + pos - 4);
-            // pos - 2 is reserved/zero
+            entry.index_start = read_u16_le(after + pos - 8);
+            entry.order_key = (pos >= 10) ? read_u16_le(after + pos - 10) : 0;
+
+            // Tail diagnostics: dump last 16 bytes before FFFF and decode nearby u16s
+            if (entry.material_index < num_materials) {
+                size_t tail_start = (pos >= 16) ? (pos - 16) : 0;
+                std::ostringstream tail_hex;
+                tail_hex << "Block tail @+" << std::dec << pos
+                         << " mat=" << entry.material_index
+                         << " flags=0x" << std::hex << entry.flags << std::dec
+                         << " bytes:";
+                for (size_t i = tail_start; i < pos; i++) {
+                    tail_hex << " " << std::hex << std::setw(2) << std::setfill('0') << (int)after[i];
+                }
+
+                uint16_t u16_m12 = (pos >= 12) ? read_u16_le(after + pos - 12) : 0;
+                uint16_t u16_m10 = (pos >= 10) ? read_u16_le(after + pos - 10) : 0;
+                uint16_t u16_m8 = (pos >= 8) ? read_u16_le(after + pos - 8) : 0;
+                uint16_t u16_m6 = (pos >= 6) ? read_u16_le(after + pos - 6) : 0;
+                tail_hex << std::dec
+                         << " | u16[-12]=" << u16_m12
+                         << " u16[-10]=" << u16_m10
+                         << " u16[-8]=" << u16_m8
+                         << " u16[-6]=" << u16_m6;
+                LOG_DEBUG("XobParser", tail_hex.str());
+            }
             
-            // Look for potential index_start (try pos - 8 or pos - 10)
-            uint16_t potential_start1 = (pos >= 8) ? read_u16_le(after + pos - 8) : 0;
-            uint16_t potential_start2 = (pos >= 10) ? read_u16_le(after + pos - 10) : 0;
+            // Dump ENTIRE 104 byte block with field annotations
+            if (block_num < 5 && entry.material_index < num_materials) {
+                // Block starts 74 bytes before FFFF (or 72 for a 104-byte block with FFFF at byte 72)
+                size_t block_start = (pos >= 72) ? (pos - 72) : 0;
+                size_t block_end = pos + 32;  // Include some after FFFF
+                if (block_end > after_size) block_end = after_size;
+                
+                std::ostringstream block_hex;
+                block_hex << "Block " << block_num << " FULL (104 bytes, FFFF at +" << pos << "):\n";
+                
+                // Dump in 16-byte lines with offset
+                for (size_t line = block_start; line < block_end; line += 16) {
+                    block_hex << "  " << std::hex << std::setw(4) << std::setfill('0') << (line - block_start) << ": ";
+                    for (size_t i = 0; i < 16 && (line + i) < block_end; i++) {
+                        if (line + i == pos) block_hex << "[";
+                        block_hex << std::hex << std::setw(2) << std::setfill('0') << (int)after[line + i];
+                        if (line + i == pos + 1) block_hex << "]";
+                        block_hex << " ";
+                    }
+                    block_hex << "\n";
+                }
+                
+                // Try reading values at different offsets relative to block start
+                const uint8_t* blk = after + block_start;
+                size_t blk_len = block_end - block_start;
+                
+                block_hex << "  Field tests (offset from block start):\n";
+                // Test u16 at various offsets
+                for (size_t off = 0; off + 2 <= blk_len && off < 80; off += 2) {
+                    uint16_t val = read_u16_le(blk + off);
+                    // Only log values that could be triangle counts (1-40000)
+                    if (val >= 1 && val <= 40000 && val != 0xFFFF) {
+                        block_hex << "    u16 @ " << std::dec << off << " = " << val << " (" << val/3 << " tris)\n";
+                    }
+                }
+                LOG_DEBUG("XobParser", block_hex.str());
+            }
             
             // Only process valid materials
             if (entry.material_index < num_materials) {
-                LOG_DEBUG("XobParser", "FFFF at +" << pos 
+                LOG_DEBUG("XobParser", "FFFF at +" << std::dec << pos 
                     << ": mat=" << entry.material_index 
+                    << " idx_start=" << entry.index_start
                     << " idx_count=" << entry.index_count 
                     << " lod=" << entry.lod_index
-                    << " flags=0x" << std::hex << entry.flags << std::dec
-                    << " | before: [" << potential_start2 << ", " << potential_start1 << "]");
+                    << " flags=0x" << std::hex << entry.flags << std::dec);
                 
-                entry.index_start = 0; // Unknown for now
                 submesh_entries.push_back(entry);
+                block_num++;
             }
             pos += 5; // Skip past this marker
         }
@@ -1049,18 +2025,20 @@ static std::vector<MaterialRange> extract_material_ranges(const uint8_t* data, s
     // NEW APPROACH: Process blocks in ORDER (not by material index)
     // The index buffer is arranged to match block order, not material order
     
-    // Structure to hold block info in order
+    // Structure to hold block info
     struct BlockEntry {
         size_t position;        // Position in submesh data
         uint32_t material_index;
-        uint32_t index_count;
+        uint32_t index_start;   // Start position in index buffer
+        uint32_t index_count;   // Number of indices
         uint16_t lod;
         uint16_t flags;
+        uint16_t order_key;     // Tail hint for ordering
     };
     std::vector<BlockEntry> all_blocks;
     
     // First pass: collect ALL blocks in order
-    for (size_t pos = 6; pos + 6 <= after_size; pos++) {
+    for (size_t pos = 8; pos + 6 <= after_size; pos++) {
         if (after[pos] == 0xFF && after[pos+1] == 0xFF) {
             BlockEntry entry;
             entry.position = pos;
@@ -1068,12 +2046,16 @@ static std::vector<MaterialRange> extract_material_ranges(const uint8_t* data, s
             entry.flags = read_u16_le(after + pos + 4);
             entry.index_count = read_u16_le(after + pos - 6);
             entry.lod = read_u16_le(after + pos - 4);
+            entry.index_start = read_u16_le(after + pos - 8);
+            entry.order_key = (pos >= 10) ? read_u16_le(after + pos - 10) : 0;
             
             if (entry.material_index < num_materials) {
                 all_blocks.push_back(entry);
                 LOG_DEBUG("XobParser", "Block at +" << pos << ": mat=" << entry.material_index 
+                          << " idx_start=" << entry.index_start
                           << " idx_count=" << entry.index_count << " lod=" << entry.lod 
-                          << " flags=0x" << std::hex << entry.flags << std::dec);
+                          << " flags=0x" << std::hex << entry.flags << std::dec
+                          << " order_key=" << entry.order_key);
             }
             pos += 5;
         }
@@ -1081,140 +2063,292 @@ static std::vector<MaterialRange> extract_material_ranges(const uint8_t* data, s
     
     LOG_DEBUG("XobParser", "Found " << all_blocks.size() << " total submesh blocks");
     
-    // Find which LOD levels are present
-    std::set<uint16_t> lod_levels;
-    for (const auto& block : all_blocks) {
-        lod_levels.insert(block.lod);
+    // Maximum reasonable LOD level
+    constexpr uint16_t MAX_REASONABLE_LOD = 10;
+    
+    // For skinned meshes (0x1F, 0x9F), the LOD field appears to be encoded differently
+    // or contains garbage. We need to infer LOD from flags or treat all blocks as LOD 0.
+    bool is_skinned = (mesh_type == 0x1F || mesh_type == 0x9F);
+    
+    LOG_DEBUG("XobParser", "mesh_type=0x" << std::hex << (int)mesh_type << std::dec 
+              << " is_skinned=" << is_skinned << " blocks=" << all_blocks.size());
+    
+    if (is_skinned) {
+        LOG_DEBUG("XobParser", "Skinned mesh detected - reinterpreting ALL block LODs from flags");
+        // For skinned meshes, the LOD field is NOT a real LOD level!
+        // It appears to be derived from or duplicate the flags upper byte.
+        // The REAL LOD is always 0 for main geometry.
+        // 
+        // Flag patterns observed:
+        //   flags=0x0001/0x0002: LOD 0, single pass (main geometry)
+        //   flags=0x0102: LOD 0, pass 1 (main geometry)
+        //   flags=0x0202: LOD 0, pass 2 (main geometry)
+        //   flags=0x0702: LOD 0, pass 7 (main geometry - multi-pass)
+        //   flags=0x0401: Actual LOD 4 block (lower detail / shadow)
+        //   flags=0x0201: Actual LOD 2 block
+        //
+        // Rule: upper byte indicates:
+        //       0x00-0x07 with base 0x02 = render pass number (LOD 0)
+        //       0x01-0x0F with base 0x01 = actual LOD level
+        //       
+        // Key insight: flags with base 0x02 are multi-pass at LOD 0
+        //              flags with base 0x01 and upper > 0 are shadow/distance LOD
+        for (auto& block : all_blocks) {
+            uint16_t original_lod = block.lod;
+            uint16_t base_flags = block.flags & 0x00FF;  // Lower byte
+            uint16_t upper_byte = (block.flags >> 8) & 0xFF;
+            
+            // For skinned meshes, reinterpret LOD based on flags
+            if (base_flags == 0x02) {
+                // Multi-pass rendering at LOD 0 (main geometry)
+                block.lod = 0;
+            } else if (base_flags == 0x01 && upper_byte == 0) {
+                // Single-pass at LOD 0 (main geometry)
+                block.lod = 0;
+            } else if (base_flags == 0x01 && upper_byte > 0) {
+                // Shadow/distance LOD - upper byte IS the LOD level
+                block.lod = upper_byte;
+            } else {
+                // Unknown pattern - keep original or set to 0
+                if (block.lod > MAX_REASONABLE_LOD) {
+                    block.lod = 0;
+                }
+            }
+            
+            if (block.lod != original_lod) {
+                LOG_DEBUG("XobParser", "Skinned block LOD fix: " << original_lod << " -> " << block.lod 
+                          << " (flags=0x" << std::hex << block.flags << ", base=" << base_flags 
+                          << ", upper=" << upper_byte << ")" << std::dec);
+            }
+        }
     }
     
-    // Prefer LOD 0 if available, otherwise use minimum LOD
+    // Find which LOD level has the best coverage
+    std::map<uint16_t, uint32_t> lod_index_sums;
+    for (const auto& block : all_blocks) {
+        if (block.lod <= MAX_REASONABLE_LOD) {
+            lod_index_sums[block.lod] += block.index_count;
+        }
+    }
+    
     uint16_t target_lod = 0;
-    if (lod_levels.find(0) == lod_levels.end() && !lod_levels.empty()) {
-        target_lod = *lod_levels.begin(); // Use lowest available LOD
+    uint32_t best_sum = 0;
+    for (const auto& [lod, sum] : lod_index_sums) {
+        if (sum > best_sum) {
+            target_lod = lod;
+            best_sum = sum;
+        }
     }
     
-    LOG_DEBUG("XobParser", "Target LOD: " << target_lod 
-              << " (available: " << lod_levels.size() << " levels)");
+    LOG_DEBUG("XobParser", "Target LOD: " << static_cast<int>(target_lod)
+              << " (best_sum=" << best_sum << "/" << total_indices << ")");
     
-    // Second pass: extract ALL blocks at target LOD level
-    // IMPORTANT: Include ALL pass types (0x01, 0x02, etc.) as they all contain valid geometry
-    // The pass type flag indicates render pass (opaque, transparent, etc.) but ALL are part of the mesh
-    std::map<uint32_t, uint32_t> mat_first_count; // material -> first seen index_count
-    std::vector<std::pair<uint32_t, uint32_t>> ordered_entries; // (mat_idx, index_count) in block order
+    // ANALYSIS: Count passes per material at target LOD
+    // flags=0x2 are multi-pass (shadow, etc) - idx_count is inflated
+    // flags=0x1 are single-pass - idx_count is accurate
+    std::map<uint32_t, uint32_t> mat_pass_count;  // How many blocks per material
+    std::map<uint32_t, uint32_t> mat_total_idx;   // Total idx_count per material (across all passes)
+    std::map<uint32_t, uint16_t> mat_flags;       // Flags for each material
     
     for (const auto& block : all_blocks) {
-        // Only process blocks at target LOD
         if (block.lod != target_lod) continue;
+        mat_pass_count[block.material_index]++;
+        mat_total_idx[block.material_index] += block.index_count;
+        mat_flags[block.material_index] = block.flags;  // Keep last flags
+    }
+    
+    LOG_DEBUG("XobParser", "=== PASS COUNT ANALYSIS ===");
+    for (const auto& [mat, count] : mat_pass_count) {
+        uint32_t total_idx = mat_total_idx[mat];
+        uint32_t per_pass = total_idx / count;
+        uint16_t flags = mat_flags[mat];
+        LOG_DEBUG("XobParser", "  Mat " << mat << ": " << count << " passes, total_idx=" << total_idx 
+                  << ", per_pass=" << per_pass << " (" << per_pass/3 << " tris), flags=0x" << std::hex << flags << std::dec);
+    }
+    
+    // Collect unique materials in TRUE FILE ORDER, with CORRECTED triangle counts
+    // Important: Process ALL blocks in a single pass to preserve file order
+    // Materials from non-target LODs should appear in their file position, not at the end
+    std::set<uint32_t> seen_materials;
+    std::vector<BlockEntry> ordered_blocks;
+    
+    for (const auto& block : all_blocks) {
+        // Skip blocks with unreasonable LOD values (garbage data)
+        if (block.lod > MAX_REASONABLE_LOD) continue;
         
-        // First occurrence of this material at this LOD (any pass type)
-        if (mat_first_count.find(block.material_index) == mat_first_count.end()) {
-            mat_first_count[block.material_index] = block.index_count;
-            ordered_entries.push_back({block.material_index, block.index_count});
-            LOG_DEBUG("XobParser", "Using block: mat=" << block.material_index 
-                      << " index_count=" << block.index_count
-                      << " flags=0x" << std::hex << (int)block.flags << std::dec);
+        if (seen_materials.count(block.material_index) == 0) {
+            seen_materials.insert(block.material_index);
+            
+            // Create a modified block with corrected index count
+            BlockEntry corrected = block;
+            
+            // For target LOD, apply pass count corrections
+            if (block.lod == target_lod) {
+                uint32_t passes = mat_pass_count[block.material_index];
+                
+                // For skinned meshes, we need to handle multi-pass blocks differently
+                if (is_skinned && passes > 1) {
+                    uint32_t first_count = block.index_count;
+                    uint32_t total = mat_total_idx[block.material_index];
+                    uint32_t avg = total / passes;
+                    
+                    float ratio = static_cast<float>(first_count) / static_cast<float>(avg);
+                    if (ratio > 0.8f && ratio < 1.2f) {
+                        // Similar counts - render passes, use first block's count
+                        LOG_DEBUG("XobParser", "Mat " << block.material_index << ": skinned render passes, using first idx_count=" 
+                                  << block.index_count << " (" << block.index_count/3 << " tris), ratio=" << ratio);
+                    } else {
+                        // Different counts - geometry parts, sum them all
+                        corrected.index_count = total;
+                        LOG_DEBUG("XobParser", "Mat " << block.material_index << ": skinned geometry parts, summing idx_count=" 
+                                  << total << " (" << total/3 << " tris), ratio=" << ratio);
+                    }
+                } else if (is_skinned) {
+                    LOG_DEBUG("XobParser", "Mat " << block.material_index << ": skinned single pass, idx_count=" 
+                              << block.index_count << " (" << block.index_count/3 << " tris)");
+                }
+                // For static meshes with multi-pass, divide by number of passes
+                else if (passes > 1 && (block.flags & 0x2)) {
+                    corrected.index_count = mat_total_idx[block.material_index] / passes;
+                    LOG_DEBUG("XobParser", "Mat " << block.material_index << ": corrected from " 
+                              << block.index_count << " to " << corrected.index_count << " (/" << passes << " passes)");
+                }
+            } else {
+                // Material from non-target LOD - appears in file order
+                LOG_DEBUG("XobParser", "Added mat " << block.material_index << " from LOD " << block.lod << " (file order)");
+            }
+            
+            ordered_blocks.push_back(corrected);
         }
     }
     
-    // NOTE: Do NOT add materials from other LODs - they have 0 triangles at target LOD
-    // The geometry at LOD 0 only contains triangles for materials with LOD 0 blocks
+    LOG_DEBUG("XobParser", "Skinned mesh: using TRUE FILE ORDER (single pass through all blocks)");
     
-    LOG_DEBUG("XobParser", "Using " << ordered_entries.size() << " blocks at LOD " << target_lod);
+    // Sort blocks by tail-derived order_key (pos-10). This appears to align with index buffer order.
+    // Fallback to material index when order_key is missing or zero.
+    std::sort(ordered_blocks.begin(), ordered_blocks.end(), 
+              [](const BlockEntry& a, const BlockEntry& b) {
+                  if (a.order_key == 0 && b.order_key == 0) {
+                      return a.material_index < b.material_index;
+                  }
+                  if (a.order_key == 0) return false;
+                  if (b.order_key == 0) return true;
+                  if (a.order_key != b.order_key) return a.order_key < b.order_key;
+                  return a.material_index < b.material_index;
+              });
     
-    // Calculate sum of all explicit entries
-    uint32_t explicit_sum = 0;
-    for (const auto& entry : ordered_entries) {
-        explicit_sum += entry.second;
+    LOG_DEBUG("XobParser", "Sorted blocks by order_key:");
+    for (const auto& block : ordered_blocks) {
+        LOG_DEBUG("XobParser", "  mat=" << block.material_index 
+                  << " idx_start=" << block.index_start 
+                  << " idx_count=" << block.index_count
+                  << " order_key=" << block.order_key);
     }
     
-    // Check if explicit entries exceed total - if so, mat0 entries are multi-pass (overlapping)
-    // In that case, use implicit calculation for mat0
-    bool mat0_is_implicit = false;
-    uint32_t mat0_explicit_count = 0;
-    for (const auto& entry : ordered_entries) {
-        if (entry.first == 0) {
-            mat0_explicit_count = entry.second;
-            break;
+    LOG_DEBUG("XobParser", "Using " << ordered_blocks.size() << " unique materials sorted by material_index");
+    
+    // Log the order
+    {
+        std::ostringstream order_str;
+        order_str << "Block order: ";
+        for (const auto& block : ordered_blocks) {
+            order_str << "mat" << block.material_index << "(" << block.index_count/3 << ") ";
+        }
+        LOG_DEBUG("XobParser", order_str.str());
+    }
+    
+    // Calculate total triangles from blocks (to verify)
+    uint32_t block_total = 0;
+    for (const auto& block : ordered_blocks) {
+        block_total += block.index_count / 3;
+    }
+    LOG_DEBUG("XobParser", "Block total: " << block_total << " tris (actual: " << total_triangles << ")");
+    
+    // NEW APPROACH: Don't scale proportionally - it shifts ALL boundaries
+    // Instead, use exact counts for smaller materials and let large materials absorb the difference
+    // 
+    // Observation: Small material counts (mat2-10) seem accurate
+    // Large material counts (mat0, mat1) are inflated due to multi-pass rendering
+    
+    // Calculate sum of "reliable" small materials (those with single pass or small counts)
+    uint32_t small_mat_total = 0;
+    uint32_t large_mat_count = 0;
+    const uint32_t SMALL_THRESHOLD = 10000;  // Materials with <10k tris are considered reliable
+    
+    for (const auto& block : ordered_blocks) {
+        uint32_t tris = block.index_count / 3;
+        if (tris < SMALL_THRESHOLD) {
+            small_mat_total += tris;
+        } else {
+            large_mat_count++;
         }
     }
     
-    // Calculate what mat0 SHOULD be if implicit
-    uint32_t sum_others = explicit_sum - mat0_explicit_count;
-    uint32_t mat0_implicit = (sum_others < total_indices) ? (total_indices - sum_others) : 0;
+    // Triangles available for large materials
+    uint32_t large_mat_total = (total_triangles > small_mat_total) ? 
+                               (total_triangles - small_mat_total) : 0;
     
-    LOG_DEBUG("XobParser", "Mat0 explicit=" << mat0_explicit_count << ", implicit=" << mat0_implicit 
-              << ", sum_others=" << sum_others << ", explicit_sum=" << explicit_sum);
+    LOG_DEBUG("XobParser", "Small materials: " << small_mat_total << " tris, "
+              << "Large materials (" << large_mat_count << "): " << large_mat_total << " tris available");
     
-    // If explicit sum exceeds total, mat0's explicit entry includes multi-pass data
-    // Use implicit calculation instead
-    if (explicit_sum > total_indices) {
-        mat0_is_implicit = true;
-        LOG_DEBUG("XobParser", "Explicit sum (" << explicit_sum << ") > total (" << total_indices 
-                  << "), using implicit mat0=" << mat0_implicit);
-    }
-    
-    // CRITICAL: The index buffer is organized by MATERIAL INDEX ORDER (0, 1, 2, ...)
-    // NOT by block order in the header! Sort entries by material index.
-    
-    // Build map from material index to index count
-    std::map<uint32_t, uint32_t> mat_to_count;
-    for (const auto& entry : ordered_entries) {
-        uint32_t mat_idx = entry.first;
-        uint32_t idx_count = entry.second;
-        
-        // Only store first occurrence (already filtered above)
-        if (mat_to_count.find(mat_idx) == mat_to_count.end()) {
-            mat_to_count[mat_idx] = idx_count;
-        }
-    }
-    
-    // Apply implicit mat0 calculation if needed
-    // ONLY if mat0 had explicit blocks at target LOD (multi-pass case)
-    // Do NOT add mat0 if it had no blocks at target LOD
-    if (mat0_is_implicit && mat_to_count.find(0) != mat_to_count.end()) {
-        mat_to_count[0] = mat0_implicit;
-        LOG_DEBUG("XobParser", "Applied implicit mat0: " << mat0_implicit);
-    }
-    // NOTE: If mat0 has no blocks at target LOD, it has 0 triangles - don't add it
-    
-    LOG_DEBUG("XobParser", "Building ranges in MATERIAL INDEX ORDER (not block order)");
-    
-    // Build material ranges in MATERIAL INDEX ORDER (0, 1, 2, ...)
-    // The std::map iterates in key order, which is material index order
+    // Build ranges - use exact counts for small materials, proportional for large
     uint32_t current_tri = 0;
-    for (const auto& [mat_idx, idx_count_raw] : mat_to_count) {
-        uint32_t idx_count = idx_count_raw;
-        
-        // Skip materials with zero indices
-        if (idx_count == 0) continue;
-        
-        // Convert to triangle count (round down)
-        uint32_t tri_count = idx_count / 3;
-        if (tri_count == 0) continue;
-        
-        // Clamp to total triangles
-        if (current_tri >= total_triangles) {
-            LOG_DEBUG("XobParser", "Skipping mat " << mat_idx << " - start beyond total");
-            continue;
+    uint32_t large_mat_used = 0;
+    
+    // First pass: calculate total claimed by large materials for proportional split
+    uint32_t large_mat_claimed = 0;
+    for (const auto& block : ordered_blocks) {
+        uint32_t tris = block.index_count / 3;
+        if (tris >= SMALL_THRESHOLD) {
+            large_mat_claimed += tris;
         }
+    }
+    
+    for (size_t i = 0; i < ordered_blocks.size(); i++) {
+        const auto& block = ordered_blocks[i];
+        uint32_t block_tris = block.index_count / 3;
+        uint32_t tri_count;
+        
+        if (block_tris < SMALL_THRESHOLD) {
+            // Small material - use exact count
+            tri_count = block_tris;
+        } else {
+            // Large material - take proportional share of remaining large budget
+            if (large_mat_claimed > 0) {
+                float ratio = static_cast<float>(block_tris) / static_cast<float>(large_mat_claimed);
+                tri_count = static_cast<uint32_t>(std::round(large_mat_total * ratio));
+            } else {
+                tri_count = large_mat_total / std::max(1u, large_mat_count);
+            }
+        }
+        
+        // Clamp to remaining triangles
         if (current_tri + tri_count > total_triangles) {
             tri_count = total_triangles - current_tri;
         }
         
+        // Last block gets all remaining (avoid rounding errors)
+        if (i == ordered_blocks.size() - 1) {
+            tri_count = total_triangles - current_tri;
+        }
+        
+        if (tri_count == 0) continue;
+        
         MaterialRange r;
-        r.material_index = mat_idx;
+        r.material_index = block.material_index;
         r.triangle_start = current_tri;
         r.triangle_end = current_tri + tri_count;
         r.triangle_count = tri_count;
         result.push_back(r);
         
-        LOG_DEBUG("XobParser", "  Range: mat=" << mat_idx << " tris=" << current_tri 
-                  << "-" << (current_tri + tri_count));
+        LOG_DEBUG("XobParser", "  Range: mat=" << block.material_index << " tris=" << current_tri 
+                  << "-" << (current_tri + tri_count) << " (count=" << tri_count 
+                  << (block_tris >= SMALL_THRESHOLD ? " LARGE" : " small") << ")");
         
         current_tri += tri_count;
     }
     
-    // If no ranges were created, fall back to single material
+    // Fallback if empty
     if (result.empty()) {
         MaterialRange r0;
         r0.material_index = 0;
@@ -1492,26 +2626,26 @@ std::optional<XobMesh> XobParser::parse(uint32_t target_lod) {
     materials_ = extract_materials_from_head(head_data.data(), head_data.size());
     LOG_DEBUG("XobParser", "Found " << materials_.size() << " materials");
     
-    // Parse LZO4 descriptors from HEAD chunk
-    auto descriptors = parse_lzo4_descriptors(head_data.data(), head_data.size());
-    if (descriptors.empty()) {
+    // Parse LZO4 descriptors from HEAD chunk (new v8 format)
+    descriptors_ = parse_lzo4_descriptors_v8(head_data.data(), head_data.size());
+    if (descriptors_.empty()) {
         LOG_ERROR("XobParser", "No LZO4 descriptors found in HEAD chunk");
         return std::nullopt;
     }
-    LOG_DEBUG("XobParser", "Found " << descriptors.size() << " LOD descriptors");
+    LOG_DEBUG("XobParser", "Found " << descriptors_.size() << " LOD descriptors");
     
     // Validate LOD index
-    if (target_lod >= descriptors.size()) {
+    if (target_lod >= descriptors_.size()) {
         LOG_WARNING("XobParser", "Requested LOD " << target_lod << " > max " 
-                    << (descriptors.size()-1) << ", using LOD 0");
+                    << (descriptors_.size()-1) << ", using LOD 0");
         target_lod = 0;
     }
     
     // Get descriptor for target LOD
-    const auto& desc = descriptors[target_lod];
-    if (desc.vertex_count == 0 || desc.triangle_count == 0) {
+    const auto& desc = descriptors_[target_lod];
+    if (desc.unique_vertex_count == 0 || desc.triangle_count == 0) {
         LOG_ERROR("XobParser", "Invalid LOD " << target_lod << " descriptor: verts=" 
-                  << desc.vertex_count << " tris=" << desc.triangle_count);
+                  << desc.unique_vertex_count << " tris=" << desc.triangle_count);
         return std::nullopt;
     }
     
@@ -1532,22 +2666,26 @@ std::optional<XobMesh> XobParser::parse(uint32_t target_lod) {
     }
     LOG_DEBUG("XobParser", "Decompressed: " << decompressed.size() << " bytes");
     
-    // Extract LOD region (REVERSE order - LOD0 at END)
-    auto region = extract_lod_region_internal(decompressed, descriptors, target_lod);
+    // Extract LOD region - use decompressed_size from descriptor
+    // For now, use all decompressed data (single LOD most common)
+    std::vector<uint8_t> region;
+    if (desc.decompressed_size > 0 && desc.decompressed_size <= decompressed.size()) {
+        region.assign(decompressed.begin(), decompressed.begin() + desc.decompressed_size);
+    } else {
+        region = decompressed;
+    }
     if (region.empty()) {
         LOG_ERROR("XobParser", "Failed to extract LOD " << target_lod << " region");
         return std::nullopt;
     }
     LOG_DEBUG("XobParser", "LOD " << target_lod << " region: " << region.size() << " bytes");
     
-    // Parse mesh from region (pass format flags for correct attribute layout)
+    // Parse mesh from region using mesh type for correct vertex layout
     XobMesh mesh;
-    if (!parse_mesh_from_region(region, desc.vertex_count, desc.triangle_count, 
-                                 desc.position_stride, 
-                                 desc.has_normals, desc.has_uvs, desc.has_tangents,
-                                 desc.has_skinning, desc.has_extra_normals, mesh)) {
-        LOG_ERROR("XobParser", "Failed to parse mesh (verts=" << desc.vertex_count 
-                  << " tris=" << desc.triangle_count << " stride=" << desc.position_stride << ")");
+    if (!parse_mesh_from_region(region, desc.unique_vertex_count, desc.triangle_count, 
+                                 desc.mesh_type, desc.attr_config[ATTR_CFG_BONE_STREAMS], mesh)) {
+        LOG_ERROR("XobParser", "Failed to parse mesh (verts=" << desc.unique_vertex_count 
+                  << " tris=" << desc.triangle_count << " type=0x" << std::hex << (int)desc.mesh_type << std::dec << ")");
         return std::nullopt;
     }
     LOG_INFO("XobParser", "Parsed LOD " << target_lod << ": " << mesh.vertices.size() 
@@ -1563,7 +2701,7 @@ std::optional<XobMesh> XobParser::parse(uint32_t target_lod) {
     
     // Create LOD entry
     XobLod lod_data;
-    lod_data.distance = 0.0f;
+    lod_data.distance = desc.switch_distance;
     lod_data.index_offset = 0;
     lod_data.index_count = static_cast<uint32_t>(mesh.indices.size());
     lod_data.indices = mesh.indices;
@@ -1578,7 +2716,55 @@ std::optional<XobMesh> XobParser::parse(uint32_t target_lod) {
     }
     
     // Extract material ranges (which triangles use which material)
-    mesh.material_ranges = extract_material_ranges(data_.data(), data_.size(), desc.triangle_count, materials_.size());
+    // ALWAYS use legacy extraction for multi-material meshes - it parses the actual submesh blocks
+    // Descriptor-based extraction is WRONG - LZO4 descriptors describe compression, NOT materials
+    std::vector<MaterialRange> legacy_ranges;
+    
+    if (materials_.size() > 1) {
+        legacy_ranges = extract_material_ranges(data_.data(), data_.size(), desc.triangle_count, materials_.size(), desc.mesh_type);
+    }
+    
+    auto coverage = [](const std::vector<MaterialRange>& ranges) {
+        uint32_t sum = 0;
+        for (const auto& r : ranges) sum += r.triangle_count;
+        return sum;
+    };
+    
+    uint32_t legacy_coverage = coverage(legacy_ranges);
+    uint32_t total_triangles = desc.triangle_count;
+    
+    // Use legacy ranges if they provide reasonable coverage
+    if (!legacy_ranges.empty() && legacy_coverage > 0) {
+        mesh.material_ranges = std::move(legacy_ranges);
+        LOG_DEBUG("XobParser", "Using legacy material ranges (coverage=" << legacy_coverage
+                  << "/" << total_triangles << ")");
+    } else {
+        // Fallback: create ranges for each material evenly distributed
+        // This should rarely happen - it means submesh parsing failed
+        LOG_WARNING("XobParser", "No submesh blocks found, distributing triangles across " 
+                    << materials_.size() << " materials");
+        uint32_t tris_per_mat = total_triangles / static_cast<uint32_t>(materials_.size());
+        uint32_t current = 0;
+        for (size_t i = 0; i < materials_.size() && current < total_triangles; i++) {
+            MaterialRange r;
+            r.material_index = static_cast<uint32_t>(i);
+            r.triangle_start = current;
+            uint32_t count = (i == materials_.size() - 1) ? (total_triangles - current) : tris_per_mat;
+            r.triangle_end = current + count;
+            r.triangle_count = count;
+            mesh.material_ranges.push_back(r);
+            current += count;
+        }
+    }
+    
+    if (mesh.material_ranges.empty()) {
+        MaterialRange r0;
+        r0.material_index = 0;
+        r0.triangle_start = 0;
+        r0.triangle_end = desc.triangle_count;
+        r0.triangle_count = desc.triangle_count;
+        mesh.material_ranges.push_back(r0);
+    }
     LOG_DEBUG("XobParser", "Material ranges assigned: " << mesh.material_ranges.size());
     
     // Parse COLL chunk (collision data) - optional

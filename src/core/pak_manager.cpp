@@ -111,31 +111,27 @@ std::vector<uint8_t> PakManager::read_file(const std::string& virtual_path) {
     // Normalize path separators
     std::string normalized = virtual_path;
     std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
     
     LOG_DEBUG("PakManager", "Reading file: " << normalized);
     
     // Search all loaded PAKs
     for (const auto& pak : paks_) {
-        // Check if file exists in this PAK
-        bool found = false;
         for (const auto& file : pak->file_list) {
             std::string file_normalized = file;
             std::replace(file_normalized.begin(), file_normalized.end(), '\\', '/');
+            std::transform(file_normalized.begin(), file_normalized.end(), file_normalized.begin(), ::tolower);
             if (file_normalized == normalized) {
-                found = true;
-                break;
-            }
-        }
-        
-        if (found) {
-            auto data = pak->extractor->read_file(virtual_path);
-            if (!data.empty()) {
-                LOG_DEBUG("PakManager", "Found in: " << pak->path.filename().string() 
-                          << " (" << data.size() << " bytes)");
-                return data;
-            } else {
-                LOG_WARNING("PakManager", "File listed but read failed: " << virtual_path 
+                // Read using the stored path to avoid case mismatches
+                auto data = pak->extractor->read_file(file);
+                if (!data.empty()) {
+                    LOG_DEBUG("PakManager", "Found in: " << pak->path.filename().string() 
+                              << " (" << data.size() << " bytes)");
+                    return data;
+                }
+                LOG_WARNING("PakManager", "File listed but read failed: " << file 
                             << " in " << pak->path.filename().string());
+                return {};
             }
         }
     }
@@ -149,11 +145,13 @@ bool PakManager::file_exists(const std::string& virtual_path) const {
     
     std::string normalized = virtual_path;
     std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
     
     for (const auto& pak : paks_) {
         for (const auto& file : pak->file_list) {
             std::string file_normalized = file;
             std::replace(file_normalized.begin(), file_normalized.end(), '\\', '/');
+            std::transform(file_normalized.begin(), file_normalized.end(), file_normalized.begin(), ::tolower);
             if (file_normalized == normalized) {
                 return true;
             }
@@ -168,11 +166,13 @@ std::string PakManager::find_file_pak(const std::string& virtual_path) const {
     
     std::string normalized = virtual_path;
     std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
     
     for (const auto& pak : paks_) {
         for (const auto& file : pak->file_list) {
             std::string file_normalized = file;
             std::replace(file_normalized.begin(), file_normalized.end(), '\\', '/');
+            std::transform(file_normalized.begin(), file_normalized.end(), file_normalized.begin(), ::tolower);
             if (file_normalized == normalized) {
                 return pak->path.string();
             }

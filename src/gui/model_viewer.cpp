@@ -1074,9 +1074,49 @@ void ModelViewer::load_material_textures() {
                 } else {
                     LOG_DEBUG("ModelViewer", "Emat has no Diffuse (BCR) texture");
                     
+                    // If MCR exists, try to derive a matching BCR/Color texture by name
+                    // This avoids solid-color materials when BCR exists but isn't referenced in the emat
+                    if (mat_info.textures.count("MCR")) {
+                        std::string mcr_path = mat_info.textures["MCR"];
+                        std::string mcr_lower = mcr_path;
+                        std::transform(mcr_lower.begin(), mcr_lower.end(), mcr_lower.begin(), ::tolower);
+                        
+                        // Build candidate BCR paths based on MCR path
+                        std::vector<std::string> bcr_candidates;
+                        auto add_candidate = [&](const std::string& suffix) {
+                            std::string candidate = mcr_path;
+                            size_t pos = mcr_lower.rfind("_mcr");
+                            if (pos != std::string::npos) {
+                                candidate.replace(pos, 4, suffix);
+                                bcr_candidates.push_back(candidate);
+                            }
+                        };
+                        
+                        add_candidate("_bcr");
+                        add_candidate("_co");
+                        add_candidate("_diffuse");
+                        add_candidate("_albedo");
+                        add_candidate("_color");
+                        
+                        for (const auto& candidate : bcr_candidates) {
+                            LOG_DEBUG("ModelViewer", "Trying derived diffuse from MCR: " << candidate);
+                            auto tex_data = texture_loader_ ? texture_loader_(candidate) : std::vector<uint8_t>{};
+                            if (tex_data.empty()) tex_data = pak_mgr.read_file(candidate);
+                            if (tex_data.empty()) tex_data = search_index_for_texture(candidate);
+                            if (!tex_data.empty()) {
+                                texture_found = try_load_texture_data(mat_idx, tex_data, candidate);
+                                if (texture_found) {
+                                    textures_loaded++;
+                                    LOG_INFO("ModelViewer", "Loaded derived diffuse: " << candidate);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
                     // For MCR-only materials: load MCR texture + use base color
                     // MCR provides metallic/cavity/roughness, base color provides surface color
-                    if (mat_info.textures.count("MCR")) {
+                    if (!texture_found && mat_info.textures.count("MCR")) {
                         std::string mcr_path = mat_info.textures["MCR"];
                         LOG_INFO("ModelViewer", "Loading MCR texture for PBR details: " << mcr_path);
                         

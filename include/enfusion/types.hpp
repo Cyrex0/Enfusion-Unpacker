@@ -46,13 +46,58 @@ struct Fragment {
 };
 
 /**
- * LZO compression descriptor for XOB.
+ * LZO4 descriptor for XOB LOD data (116 bytes in file).
+ * Per XOB9_FORMAT_SPEC_v8.md section 2.3
  */
 struct LzoDescriptor {
-    uint32_t vertex_count = 0;
-    uint32_t index_count = 0;
-    uint32_t compressed_size = 0;
-    uint32_t decompressed_size = 0;
+    // Core sizes (+0x14 and +0x1C from LZO4 marker)
+    uint32_t compressed_size = 0;       // +0x14: Size in LODS chunk
+    uint32_t decompressed_size = 0;     // +0x1C: Size after LZ4 decompression
+    
+    // LOD metadata (+0x04 and +0x0C)
+    uint32_t quality_tier = 1;          // +0x04: 1-5, 1=lowest, 5=highest
+    float switch_distance = 0.5f;       // +0x0C: Screen coverage ratio for LOD switch
+    
+    // Format flags (+0x20)
+    uint32_t format_flags = 0;          // Full 32-bit format flags
+    uint8_t mesh_type = 0x0F;           // High byte: 0x0F=static, 0x1F=skinned, 0x8F=emissive, 0x9F=both
+    
+    // Mesh counts (+0x4C-0x52)
+    uint16_t triangle_count = 0;        // +0x4C: Number of triangles
+    uint16_t unique_vertex_count = 0;   // +0x4E: Vertices after deduplication
+    uint16_t original_vertex_count = 0; // +0x50: Vertices before deduplication
+    uint16_t submesh_index = 0;         // +0x52: Submesh/material index
+    
+    // Bounding box (+0x24-0x3B)
+    glm::vec3 bounds_min{0.0f};
+    glm::vec3 bounds_max{0.0f};
+    
+    // Attribute configuration (+0x58, 8 bytes)
+    uint8_t attr_config[8] = {0};       // [0]=LOD flag, [2]=UV sets, [3]=mat slots, [4]=bone streams
+    
+    // UV bounds (+0x60-0x6F)
+    float uv_min_u = 0.0f;
+    float uv_max_u = 1.0f;
+    float uv_min_v = 0.0f;
+    float uv_max_v = 1.0f;
+    
+    // Surface info (+0x70)
+    float surface_scale = 1.0f;
+    
+    // Derived properties
+    int position_stride = 12;           // 12 or 16 bytes per position
+    bool has_normals = true;
+    bool has_uvs = true;
+    bool has_tangents = false;
+    bool has_skinning = false;
+    bool has_second_uv = false;
+    bool has_vertex_color = false;
+    
+    // Convenience accessors
+    uint32_t vertex_count() const { return unique_vertex_count; }
+    uint32_t index_count() const { return triangle_count * 3; }
+    uint8_t uv_set_count() const { return attr_config[2]; }
+    uint8_t bone_stream_count() const { return attr_config[4]; }
 };
 
 /**

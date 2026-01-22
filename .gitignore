@@ -37,3 +37,4 @@
 *.py
 xob_analysis.txt
 XOB_FORMAT_SPEC.md
+/docs

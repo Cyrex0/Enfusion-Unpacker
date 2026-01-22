@@ -12,6 +12,7 @@
 #include "enfusion/pak_reader.hpp"
 #include "enfusion/addon_extractor.hpp"
 #include "enfusion/logging.hpp"
+#include "enfusion/xob_parser.hpp"
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -88,9 +89,11 @@ struct CliArgs {
     bool cli_mode = false;
     bool list_mode = false;
     bool extract_mode = false;
+    bool xob_test_mode = false;
     std::string pak_path;
     std::string output_dir;
     std::string filter_pattern;
+    std::string xob_path;
     bool verbose = false;
     bool debug_logging = false;
 };
@@ -104,6 +107,7 @@ Usage:
   EnfusionUnpacker.exe --help                       Show this help
   EnfusionUnpacker.exe --list <pak_path>            List files in PAK
   EnfusionUnpacker.exe --extract <pak_path> --output <dir> [options]
+    EnfusionUnpacker.exe --xob-test <pak_path> --xob <path_in_pak>
 
 Options:
   --help, -h           Show this help message
@@ -111,6 +115,8 @@ Options:
   --extract, -e        Extract files from PAK
   --output, -o <dir>   Output directory for extraction
   --filter, -f <pat>   Only extract files matching pattern (glob-style)
+    --xob-test           Parse a single XOB from a PAK (headless diagnostics)
+    --xob <path>         XOB path inside the PAK (use with --xob-test)
   --verbose, -v        Verbose output
   --debug, -d          Enable debug logging for troubleshooting
 
@@ -119,6 +125,7 @@ Examples:
   EnfusionUnpacker.exe --extract "data.pak" --output "C:\Extracted" --filter "*.edds"
   EnfusionUnpacker.exe -e addon.pak -o ./output -f "Textures/*"
   EnfusionUnpacker.exe --debug -e addon.pak -o ./output   # With debug logs
+    EnfusionUnpacker.exe --xob-test "data.pak" --xob "Assets/Vehicles/Wheeled/Cougar/CougarH_Base.xob"
 
 )" << std::endl;
 }
@@ -147,6 +154,13 @@ CliArgs parse_args(int argc, char* argv[]) {
                 args.pak_path = argv[++i];
             }
         }
+        else if (arg == "--xob-test" || arg == "-x") {
+            args.xob_test_mode = true;
+            args.cli_mode = true;
+            if (i + 1 < argc) {
+                args.pak_path = argv[++i];
+            }
+        }
         else if (arg == "--output" || arg == "-o") {
             if (i + 1 < argc) {
                 args.output_dir = argv[++i];
@@ -155,6 +169,11 @@ CliArgs parse_args(int argc, char* argv[]) {
         else if (arg == "--filter" || arg == "-f") {
             if (i + 1 < argc) {
                 args.filter_pattern = argv[++i];
+            }
+        }
+        else if (arg == "--xob") {
+            if (i + 1 < argc) {
+                args.xob_path = argv[++i];
             }
         }
         else if (arg == "--verbose" || arg == "-v") {
@@ -235,6 +254,100 @@ int run_cli(const CliArgs& args) {
     auto files = reader.list_files();
     std::cout << "PAK: " << args.pak_path << "\n";
     std::cout << "Files: " << files.size() << "\n\n";
+
+    // XOB test mode (headless diagnostics)
+    if (args.xob_test_mode) {
+        std::string xob_path = args.xob_path;
+
+        if (xob_path.empty()) {
+            // Auto-pick a Cougar XOB if available, otherwise first .xob
+            std::string first_xob;
+            std::string cougar_xob;
+            for (const auto& entry : files) {
+                std::string p = entry.path;
+                std::string lower = p;
+                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                if (lower.find(".xob") == std::string::npos) continue;
+                if (first_xob.empty()) first_xob = p;
+                if (lower.find("cougar") != std::string::npos) {
+                    cougar_xob = p;
+                    break;
+                }
+            }
+
+            if (!cougar_xob.empty()) {
+                xob_path = cougar_xob;
+            } else if (!first_xob.empty()) {
+                xob_path = first_xob;
+            } else {
+                std::cerr << "Error: No XOB files found in PAK\n";
+                LOG_ERROR("XobTest", "No XOB files found in PAK");
+                return 1;
+            }
+
+            LOG_INFO("XobTest", "Auto-selected XOB: " << xob_path);
+        }
+
+        auto data = reader.read_file(xob_path);
+        if (data.empty()) {
+            std::cerr << "Error: Failed to read XOB from PAK: " << xob_path << "\n";
+            LOG_ERROR("XobTest", "Failed to read XOB from PAK: " << xob_path);
+            return 1;
+        }
+
+        LOG_INFO("XobTest", "XOB: " << xob_path << " (" << data.size() << " bytes)");
+
+        enfusion::XobParser parser(std::span<const uint8_t>(data.data(), data.size()));
+        auto mesh_opt = parser.parse(0);
+        if (!mesh_opt) {
+            std::cerr << "Error: Failed to parse XOB\n";
+            LOG_ERROR("XobTest", "Failed to parse XOB");
+            return 1;
+        }
+
+        const auto& mesh = *mesh_opt;
+        uint32_t total_tris = static_cast<uint32_t>(mesh.indices.size() / 3);
+        LOG_INFO("XobTest", "Materials: " << mesh.materials.size() 
+             << " Triangles: " << total_tris 
+             << " Ranges: " << mesh.material_ranges.size());
+
+        // UV diagnostics (flat-color detection)
+        if (!mesh.vertices.empty()) {
+            float u_min = std::numeric_limits<float>::max();
+            float v_min = std::numeric_limits<float>::max();
+            float u_max = std::numeric_limits<float>::lowest();
+            float v_max = std::numeric_limits<float>::lowest();
+            size_t near_zero = 0;
+            size_t sample_count = 0;
+            const size_t stride = std::max<size_t>(1, mesh.vertices.size() / 2000);
+            for (size_t i = 0; i < mesh.vertices.size(); i += stride) {
+                const auto& uv = mesh.vertices[i].uv;
+                u_min = std::min(u_min, uv.x);
+                v_min = std::min(v_min, uv.y);
+                u_max = std::max(u_max, uv.x);
+                v_max = std::max(v_max, uv.y);
+                if (std::abs(uv.x) < 1e-4f && std::abs(uv.y) < 1e-4f) {
+                    near_zero++;
+                }
+                sample_count++;
+            }
+            float u_range = u_max - u_min;
+            float v_range = v_max - v_min;
+            float zero_pct = (sample_count > 0) ? (100.0f * near_zero / static_cast<float>(sample_count)) : 0.0f;
+            LOG_INFO("XobTest", "UV range: u=[" << u_min << "," << u_max << "] v=[" << v_min << "," << v_max 
+                     << "] (du=" << u_range << " dv=" << v_range << ") zero%=" << zero_pct);
+        }
+
+        uint32_t covered = 0;
+        for (const auto& r : mesh.material_ranges) {
+            covered += r.triangle_count;
+            LOG_INFO("XobTest", "mat=" << r.material_index
+                     << " tris=" << r.triangle_start << "-" << r.triangle_end
+                     << " count=" << r.triangle_count);
+        }
+        LOG_INFO("XobTest", "Coverage: " << covered << "/" << total_tris << " tris");
+        return (covered == total_tris) ? 0 : 2;
+    }
     
     // List mode
     if (args.list_mode) {
@@ -333,7 +446,7 @@ int main(int argc, char* argv[]) {
     CliArgs args = parse_args(argc, argv);
     
     // Initialize logging
-    if (!args.cli_mode) {
+    if (!args.cli_mode || args.xob_test_mode || args.debug_logging) {
         init_logging();
     }
     
@@ -350,7 +463,7 @@ int main(int argc, char* argv[]) {
         result = run_gui();
     }
     
-    if (!args.cli_mode) {
+    if (!args.cli_mode || args.xob_test_mode || args.debug_logging) {
         shutdown_logging();
     }
     

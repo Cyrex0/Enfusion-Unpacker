@@ -258,7 +258,11 @@ void MeshRenderer::render_mesh(const glm::mat4& view, const glm::mat4& projectio
     // Determine if we should use per-material rendering
     bool use_material_ranges = false;
     
-    if (mesh_ && !mesh_->material_ranges.empty()) {
+    // DEBUG: Temporarily disable material ranges to test base geometry
+    // TODO: Remove this line once material range issues are resolved
+    bool force_disable_material_ranges = false;  // Set to true to debug geometry
+    
+    if (mesh_ && !mesh_->material_ranges.empty() && !force_disable_material_ranges) {
         // Calculate total triangles covered by ranges
         uint32_t covered_triangles = 0;
         for (const auto& range : mesh_->material_ranges) {
