@@ -6,25 +6,8 @@
 #include <zlib.h>
 #include <lz4.h>
 #include <stdexcept>
-#include <string>
 
 namespace enfusion {
-
-// Helper to convert zlib error code to string
-static const char* zlib_error_string(int err) {
-    switch (err) {
-        case Z_OK:            return "Z_OK";
-        case Z_STREAM_END:    return "Z_STREAM_END";
-        case Z_NEED_DICT:     return "Z_NEED_DICT";
-        case Z_ERRNO:         return "Z_ERRNO";
-        case Z_STREAM_ERROR:  return "Z_STREAM_ERROR";
-        case Z_DATA_ERROR:    return "Z_DATA_ERROR";
-        case Z_MEM_ERROR:     return "Z_MEM_ERROR";
-        case Z_BUF_ERROR:     return "Z_BUF_ERROR";
-        case Z_VERSION_ERROR: return "Z_VERSION_ERROR";
-        default:              return "UNKNOWN_ERROR";
-    }
-}
 
 std::vector<uint8_t> decompress_zlib(const uint8_t* data, size_t size, size_t expected_size) {
     std::vector<uint8_t> result(expected_size);
@@ -37,15 +20,14 @@ std::vector<uint8_t> decompress_zlib(const uint8_t* data, size_t size, size_t ex
     
     int ret = inflateInit(&strm);
     if (ret != Z_OK) {
-        throw std::runtime_error(std::string("Failed to initialize zlib decompression: ") + zlib_error_string(ret));
+        throw std::runtime_error("Failed to initialize zlib decompression");
     }
     
     ret = inflate(&strm, Z_FINISH);
     inflateEnd(&strm);
     
     if (ret != Z_STREAM_END) {
-        throw std::runtime_error(std::string("Zlib decompression failed: ") + zlib_error_string(ret) + 
-                                 " (input=" + std::to_string(size) + ", expected=" + std::to_string(expected_size) + ")");
+        throw std::runtime_error("Zlib decompression failed");
     }
     
     result.resize(strm.total_out);

@@ -1,20 +1,14 @@
 ﻿/**
- * Enfusion Unpacker - Manifest Parser Implementation
- * 
- * NOTE: Manifest parsing is not yet implemented. The manifest format is used
- * for addon metadata in Enfusion engine. Implementation pending when format
- * documentation becomes available.
+ * Enfusion Unpacker - Manifest Parser Implementation (Stub)
  */
 
 #include "enfusion/manifest.hpp"
-#include "enfusion/logging.hpp"
 #include <fstream>
 
 namespace enfusion {
 
 bool ManifestParser::parse(const fs::path& path) {
-    // Manifest parsing not implemented - format undocumented
-    LOG_DEBUG("ManifestParser", "Manifest parsing not implemented: " << path.string());
+    // TODO: Actual parsing
     return true;
 }
 

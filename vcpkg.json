@@ -7,7 +7,6 @@
         "zlib",
         "lz4",
         "nlohmann-json",
-        "sqlite3",
         "glfw3",
         "glad",
         {

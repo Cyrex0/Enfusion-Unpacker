@@ -201,7 +201,7 @@ void TextureViewer::render() {
 
     ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(texture_id_)),
                  ImVec2(display_width, display_height),
-                 ImVec2(0, 0), ImVec2(1, 1), tint, ImVec4(0, 0, 0, 0));
+                 ImVec2(0, 0), ImVec2(1, 1), tint);
 
     if (ImGui::IsWindowHovered()) {
         float wheel = ImGui::GetIO().MouseWheel;

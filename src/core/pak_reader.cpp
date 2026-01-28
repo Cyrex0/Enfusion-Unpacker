@@ -1,239 +1,99 @@
 /**
  * Enfusion Unpacker - PAK Reader Implementation
- * 
- * Implements the correct FORM-based IFF format used by Enfusion engine:
- * - FORM header with PAC1 type
- * - HEAD chunk (version/metadata)
- * - DATA chunk (file contents)
- * - FILE chunk (directory/file entries)
  */
 
 #include "enfusion/pak_reader.hpp"
 #include "enfusion/compression.hpp"
 #include "enfusion/files.hpp"
-#include "enfusion/logging.hpp"
 
 #include <fstream>
 #include <cstring>
 #include <algorithm>
-#include <array>
-#include <iostream>
 
 namespace enfusion {
 
-// PAK file format constants (FORM/IFF-based)
-constexpr std::array<char, 4> FORM_SIGNATURE = {'F', 'O', 'R', 'M'};
-constexpr std::array<char, 4> PAC1_TYPE = {'P', 'A', 'C', '1'};
-constexpr std::array<char, 4> HEAD_CHUNK = {'H', 'E', 'A', 'D'};
-constexpr std::array<char, 4> DATA_CHUNK = {'D', 'A', 'T', 'A'};
-constexpr std::array<char, 4> FILE_CHUNK = {'F', 'I', 'L', 'E'};
+// PAK file format constants
+constexpr uint32_t PAK_MAGIC = 0x01000003;  // "PAK" magic number
+constexpr size_t PAK_HEADER_SIZE = 24;
 
-// Entry types in FILE chunk
-constexpr uint8_t ENTRY_TYPE_DIRECTORY = 0;
-constexpr uint8_t ENTRY_TYPE_FILE = 1;
+struct PakHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t file_count;
+    uint64_t toc_offset;
+    uint32_t toc_size;
+};
 
 PakReader::PakReader() = default;
 PakReader::~PakReader() = default;
 
-uint32_t PakReader::read_uint32_be(std::istream& stream) {
-    uint8_t bytes[4];
-    stream.read(reinterpret_cast<char*>(bytes), 4);
-    return (static_cast<uint32_t>(bytes[0]) << 24) |
-           (static_cast<uint32_t>(bytes[1]) << 16) |
-           (static_cast<uint32_t>(bytes[2]) << 8) |
-           static_cast<uint32_t>(bytes[3]);
-}
-
-uint32_t PakReader::read_uint32_le(std::istream& stream) {
-    uint32_t value;
-    stream.read(reinterpret_cast<char*>(&value), 4);
-    return value;
-}
-
 bool PakReader::open(const std::filesystem::path& path) {
-    LOG_DEBUG("PakReader", "Opening: " << path.string());
-    
-    // Close any previously open file
-    close();
-    
     file_.open(path, std::ios::binary);
     if (!file_) {
-        LOG_ERROR("PakReader", "Failed to open file: " << path.string());
         return false;
     }
     
     pak_path_ = path;
     
-    // Use try-catch to ensure file is closed on any exception
-    try {
-        // Parse FORM header
-        if (!parse_form_header()) {
-            LOG_ERROR("PakReader", "Failed to parse FORM header in: " << path.filename().string());
-            close();
-            return false;
-        }
-        
-        // Parse all chunks
-        if (!parse_chunks()) {
-            LOG_ERROR("PakReader", "Failed to parse chunks in: " << path.filename().string());
-            close();
-            return false;
-        }
-    } catch (const std::exception& e) {
-        LOG_ERROR("PakReader", "Exception while parsing: " << e.what());
-        close();
+    // Read header
+    PakHeader header;
+    file_.read(reinterpret_cast<char*>(&header), sizeof(header));
+    
+    if (header.magic != PAK_MAGIC) {
+        file_.close();
         return false;
     }
     
-    LOG_INFO("PakReader", "Opened: " << path.filename().string() 
-              << " (" << file_count() << " files, DATA@" << data_offset_ << ")");
+    // Read table of contents
+    file_.seekg(header.toc_offset);
+    
+    std::vector<uint8_t> toc_data(header.toc_size);
+    file_.read(reinterpret_cast<char*>(toc_data.data()), header.toc_size);
+    
+    // Parse TOC entries
+    parse_toc(toc_data, header.file_count);
     
     return true;
-}
-
-bool PakReader::parse_form_header() {
-    // Read FORM signature
-    char sig[4];
-    file_.read(sig, 4);
-    if (std::memcmp(sig, FORM_SIGNATURE.data(), 4) != 0) {
-        LOG_ERROR("PakReader", "Invalid FORM signature: '" 
-                  << std::string(sig, 4) << "' (expected 'FORM')");
-        return false;
-    }
-    
-    // Read form size (big-endian)
-    uint32_t form_size = read_uint32_be(file_);
-    (void)form_size; // We don't need this for parsing
-    
-    // Read form type (should be PAC1)
-    char form_type[4];
-    file_.read(form_type, 4);
-    if (std::memcmp(form_type, PAC1_TYPE.data(), 4) != 0) {
-        LOG_ERROR("PakReader", "Invalid form type: '" 
-                  << std::string(form_type, 4) << "' (expected 'PAC1')");
-        return false;
-    }
-    
-    return true;
-}
-
-bool PakReader::parse_chunks() {
-    // Get file size for bounds checking
-    file_.seekg(0, std::ios::end);
-    size_t file_size = file_.tellg();
-    file_.seekg(12); // After FORM header
-    
-    while (static_cast<size_t>(file_.tellg()) < file_size) {
-        // Read chunk ID
-        char chunk_id[4];
-        file_.read(chunk_id, 4);
-        if (file_.gcount() < 4) break;
-        
-        // Read chunk size (big-endian)
-        uint32_t chunk_size = read_uint32_be(file_);
-        size_t chunk_start = file_.tellg();
-        
-        if (std::memcmp(chunk_id, HEAD_CHUNK.data(), 4) == 0) {
-            // HEAD chunk - skip for now (contains version/GUID info)
-            file_.seekg(chunk_start + chunk_size);
-        }
-        else if (std::memcmp(chunk_id, DATA_CHUNK.data(), 4) == 0) {
-            // DATA chunk - record position for file extraction
-            data_offset_ = static_cast<uint32_t>(chunk_start);
-            data_size_ = chunk_size;
-            file_.seekg(chunk_start + chunk_size);
-        }
-        else if (std::memcmp(chunk_id, FILE_CHUNK.data(), 4) == 0) {
-            // FILE chunk - parse directory/file entries
-            parse_file_entries(file_, chunk_size);
-            file_.seekg(chunk_start + chunk_size);
-        }
-        else {
-            // Unknown chunk, skip
-            file_.seekg(chunk_start + chunk_size);
-        }
-    }
-    
-    return !entries_.empty();
-}
-
-void PakReader::parse_file_entries(std::istream& stream, uint32_t chunk_size) {
-    size_t start_pos = stream.tellg();
-    size_t end_pos = start_pos + chunk_size;
-    
-    // Skip 6-byte header (appears to be version/count info)
-    stream.seekg(6, std::ios::cur);
-    
-    // Parse entries recursively - pass entry count for root level
-    // Root entries don't have a count prefix, so we parse until end_pos
-    parse_directory_contents(stream, "", end_pos, -1);
-}
-
-// Parse a single entry (file or directory) and return true if successful
-bool PakReader::parse_single_entry(std::istream& stream, const std::string& parent_path, size_t end_pos) {
-    if (static_cast<size_t>(stream.tellg()) >= end_pos) return false;
-    
-    // Read entry type
-    uint8_t entry_type;
-    stream.read(reinterpret_cast<char*>(&entry_type), 1);
-    if (stream.gcount() < 1) return false;
-    
-    // Read name length  
-    uint8_t name_len;
-    stream.read(reinterpret_cast<char*>(&name_len), 1);
-    if (stream.gcount() < 1 || name_len == 0 || name_len > 255) return false;
-    
-    // Read name
-    std::string name(name_len, '\0');
-    stream.read(name.data(), name_len);
-    if (stream.gcount() < name_len) return false;
-    
-    // Build full path
-    std::string full_path = parent_path.empty() ? name : parent_path + "/" + name;
-    
-    if (entry_type == ENTRY_TYPE_DIRECTORY) {
-        // Directory entry - read child count and parse children
-        uint32_t child_count = read_uint32_le(stream);
-        parse_directory_contents(stream, full_path, end_pos, static_cast<int>(child_count));
-    }
-    else if (entry_type == ENTRY_TYPE_FILE) {
-        // File entry
-        PakEntry entry;
-        entry.path = full_path;
-        entry.offset = read_uint32_le(stream);
-        entry.size = read_uint32_le(stream);
-        entry.original_size = read_uint32_le(stream);
-        read_uint32_le(stream); // unknown1
-        uint32_t compression = read_uint32_be(stream);
-        entry.compression = static_cast<PakCompression>(compression);
-        stream.seekg(4, std::ios::cur); // unknown2
-        
-        entries_.push_back(entry);
-    }
-    
-    return true;
-}
-
-// Parse directory contents (children of a directory)
-// If child_count is -1, parse until end_pos (for root level)
-void PakReader::parse_directory_contents(std::istream& stream, const std::string& dir_path, 
-                                         size_t end_pos, int child_count) {
-    int parsed = 0;
-    while (static_cast<size_t>(stream.tellg()) < end_pos) {
-        // If we have a specific count, stop when reached
-        if (child_count >= 0 && parsed >= child_count) break;
-        
-        if (!parse_single_entry(stream, dir_path, end_pos)) break;
-        parsed++;
-    }
 }
 
 void PakReader::close() {
     file_.close();
     entries_.clear();
     pak_path_.clear();
-    data_offset_ = 0;
-    data_size_ = 0;
+}
+
+void PakReader::parse_toc(const std::vector<uint8_t>& toc_data, uint32_t file_count) {
+    entries_.clear();
+    entries_.reserve(file_count);
+    
+    size_t offset = 0;
+    
+    for (uint32_t i = 0; i < file_count && offset < toc_data.size(); ++i) {
+        PakEntry entry;
+        
+        // Read path length
+        if (offset + 2 > toc_data.size()) break;
+        uint16_t path_len = *reinterpret_cast<const uint16_t*>(&toc_data[offset]);
+        offset += 2;
+        
+        // Read path
+        if (offset + path_len > toc_data.size()) break;
+        entry.path = std::string(reinterpret_cast<const char*>(&toc_data[offset]), path_len);
+        offset += path_len;
+        
+        // Read file info
+        if (offset + 24 > toc_data.size()) break;
+        entry.offset = *reinterpret_cast<const uint64_t*>(&toc_data[offset]);
+        entry.size = *reinterpret_cast<const uint32_t*>(&toc_data[offset + 8]);
+        entry.compressed_size = *reinterpret_cast<const uint32_t*>(&toc_data[offset + 12]);
+        entry.flags = *reinterpret_cast<const uint32_t*>(&toc_data[offset + 16]);
+        entry.crc = *reinterpret_cast<const uint32_t*>(&toc_data[offset + 20]);
+        offset += 24;
+        
+        entry.is_compressed = (entry.compressed_size != entry.size);
+        
+        entries_.push_back(entry);
+    }
 }
 
 std::vector<PakEntry> PakReader::list_files() const {
@@ -264,7 +124,6 @@ const PakEntry* PakReader::find_entry(const std::string& path) const {
 std::vector<uint8_t> PakReader::read_file(const std::string& path) {
     const PakEntry* entry = find_entry(path);
     if (!entry) {
-        LOG_DEBUG("PakReader", "File not found in PAK: " << path);
         return {};
     }
     return read_file(*entry);
@@ -272,46 +131,29 @@ std::vector<uint8_t> PakReader::read_file(const std::string& path) {
 
 std::vector<uint8_t> PakReader::read_file(const PakEntry& entry) {
     if (!file_.is_open()) {
-        LOG_ERROR("PakReader", "Cannot read file - PAK not open");
         return {};
     }
     
-    // Seek to file data (offset is absolute in file)
+    // Seek to file data
     file_.seekg(entry.offset);
-    if (!file_.good()) {
-        LOG_ERROR("PakReader", "Failed to seek to offset " << entry.offset 
-                  << " for file: " << entry.path);
-        return {};
-    }
     
-    // Read data
-    std::vector<uint8_t> data(entry.size);
-    file_.read(reinterpret_cast<char*>(data.data()), entry.size);
-    
-    if (file_.gcount() != static_cast<std::streamsize>(entry.size)) {
-        LOG_ERROR("PakReader", "Failed to read " << entry.size << " bytes for: " 
-                  << entry.path << " (got " << file_.gcount() << ")");
-        return {};
-    }
+    // Read compressed or raw data
+    size_t read_size = entry.is_compressed ? entry.compressed_size : entry.size;
+    std::vector<uint8_t> data(read_size);
+    file_.read(reinterpret_cast<char*>(data.data()), read_size);
     
     // Decompress if needed
-    if (entry.is_compressed()) {
+    if (entry.is_compressed) {
         try {
-            if (entry.compression == PakCompression::Zlib) {
-                LOG_DEBUG("PakReader", "Decompressing (zlib): " << entry.path 
-                          << " (" << entry.size << " -> " << entry.original_size << ")");
-                auto decompressed = decompress_zlib(data.data(), data.size(), entry.original_size);
-                if (decompressed.empty()) {
-                    LOG_ERROR("PakReader", "Zlib decompression returned empty for: " << entry.path);
-                    return {};
-                }
-                return decompressed;
+            // Detect compression type
+            CompressionType type = detect_compression(data.data(), data.size());
+            if (type == CompressionType::None) {
+                // Try LZ4 as default for unknown
+                type = CompressionType::LZ4;
             }
-            LOG_WARNING("PakReader", "Unknown compression type " 
-                        << static_cast<uint32_t>(entry.compression) << " for: " << entry.path);
-            // Add other compression types here if discovered
-        } catch (const std::exception& e) {
-            LOG_ERROR("PakReader", "Decompression failed for: " << entry.path << " - " << e.what());
+            return decompress_auto(data.data(), data.size(), entry.size, type);
+        } catch (...) {
+            // Decompression failed, return empty
             return {};
         }
     }
@@ -364,7 +206,7 @@ size_t PakReader::file_count() const {
 size_t PakReader::total_size() const {
     size_t total = 0;
     for (const auto& entry : entries_) {
-        total += entry.original_size;
+        total += entry.size;
     }
     return total;
 }
@@ -372,10 +214,11 @@ size_t PakReader::total_size() const {
 size_t PakReader::compressed_size() const {
     size_t total = 0;
     for (const auto& entry : entries_) {
-        total += entry.size;
+        total += entry.is_compressed ? entry.compressed_size : entry.size;
     }
     return total;
 }
+
 
 bool PakReader::matches_pattern(const std::string& text, const std::string& pattern) const {
     // Simple glob pattern matching with * and ?
@@ -406,3 +249,5 @@ bool PakReader::matches_pattern(const std::string& text, const std::string& patt
 }
 
 } // namespace enfusion
+
+

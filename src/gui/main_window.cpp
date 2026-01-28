@@ -31,21 +31,6 @@ MainWindow::MainWindow() {
     export_dialog_ = std::make_unique<ExportDialog>();
     settings_dialog_ = std::make_unique<SettingsDialog>();
 
-    // Initialize addon browser with saved paths
-    auto& settings = App::instance().settings();
-    
-    // First try mods path (workshop addons), then game install path, then arma_addons_path
-    if (!settings.mods_install_path.empty() && std::filesystem::exists(settings.mods_install_path)) {
-        addon_browser_->set_addons_path(settings.mods_install_path);
-    } else if (!settings.game_install_path.empty()) {
-        std::filesystem::path addons_path = settings.game_install_path / "Addons";
-        if (std::filesystem::exists(addons_path)) {
-            addon_browser_->set_addons_path(addons_path);
-        }
-    } else if (!settings.arma_addons_path.empty() && std::filesystem::exists(settings.arma_addons_path)) {
-        addon_browser_->set_addons_path(settings.arma_addons_path);
-    }
-
     addon_browser_->on_addon_selected = [this](const std::filesystem::path& path) {
         current_addon_path_ = path;
         file_browser_->load(path);
@@ -89,15 +74,6 @@ MainWindow::MainWindow() {
                    ext == ".meta" || ext == ".script") {
             text_viewer_->load_text_data(data, file_path);
             show_text_viewer_ = true;
-        }
-    };
-    
-    // Hook up export callback from context menu - exports the current mod pack
-    file_browser_->on_export_requested = [this](const std::string& file_path) {
-        if (!current_addon_path_.empty()) {
-            export_dialog_->set_source(current_addon_path_);
-            export_dialog_->init_from_settings();
-            show_export_dialog_ = true;
         }
     };
 }
@@ -144,16 +120,9 @@ void MainWindow::render_title_bar() {
             if (ImGui::MenuItem("Open Addon...", "Ctrl+O")) open_addon_dialog();
             if (ImGui::MenuItem("Open Addons Folder...", "Ctrl+Shift+O")) open_addons_folder_dialog();
             ImGui::Separator();
-            if (ImGui::MenuItem("Export Selected...", "Ctrl+E", false, !current_addon_path_.empty())) {
-                // Export the currently selected mod pack (entire addon)
-                export_dialog_->set_source(current_addon_path_);
-                export_dialog_->init_from_settings();
-                show_export_dialog_ = true;
-            }
-            if (ImGui::MenuItem("Batch Export...", "Ctrl+Shift+E", false, !addon_browser_->get_addons().empty())) {
-                // Batch export - show dialog with addon selection
-                export_dialog_->set_batch_mode(addon_browser_->get_addons());
-                export_dialog_->init_from_settings();
+            if (ImGui::MenuItem("Export Selected...", "Ctrl+E", false, !selected_file_path_.empty())) show_export_dialog_ = true;
+            if (ImGui::MenuItem("Export All...", "Ctrl+Shift+E", false, !current_addon_path_.empty())) {
+                export_dialog_->set_batch_mode(true);
                 show_export_dialog_ = true;
             }
             ImGui::Separator();
@@ -171,14 +140,8 @@ void MainWindow::render_title_bar() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Tools")) {
-            if (ImGui::MenuItem("Batch Extract...", nullptr, false, !addon_browser_->get_addons().empty())) {
-                export_dialog_->set_batch_mode(addon_browser_->get_addons());
-                export_dialog_->init_from_settings();
-                show_export_dialog_ = true;
-            }
-            if (ImGui::MenuItem("Convert Textures...", nullptr, false, false)) {
-                // TODO: Implement standalone texture converter dialog
-            }
+            if (ImGui::MenuItem("Batch Extract...")) {}
+            if (ImGui::MenuItem("Convert Textures...")) {}
             ImGui::Separator();
             if (ImGui::MenuItem("Settings...", "Ctrl+,")) show_settings_ = true;
             ImGui::EndMenu();
@@ -373,28 +336,6 @@ void MainWindow::render_dialogs() {
 
     if (show_about_) {
         render_about_dialog();
-    }
-    
-    // Loading overlay
-    if (App::instance().is_loading()) {
-        ImGui::OpenPopup("Loading...");
-        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-        ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-        
-        if (ImGui::BeginPopupModal("Loading...", nullptr, 
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
-            
-            ImGui::Text("%s", App::instance().loading_message().c_str());
-            ImGui::Spacing();
-            
-            // Animated spinner
-            float time = static_cast<float>(ImGui::GetTime());
-            int dots = static_cast<int>(time * 2.0f) % 4;
-            std::string spinner = std::string(dots, '.') + std::string(3 - dots, ' ');
-            ImGui::Text("Please wait%s", spinner.c_str());
-            
-            ImGui::EndPopup();
-        }
     }
 }
 

@@ -6,9 +6,6 @@
 #include "gui/app.hpp"
 #include "gui/theme.hpp"
 #include "gui/widgets.hpp"
-#include "enfusion/pak_manager.hpp"
-#include "enfusion/pak_index.hpp"
-#include "enfusion/logging.hpp"
 
 #include <imgui.h>
 
@@ -26,7 +23,7 @@ void SettingsDialog::render(bool* open) {
     
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(500, 500));
+    ImGui::SetNextWindowSize(ImVec2(500, 450));
     
     if (ImGui::BeginPopupModal("Settings", open, ImGuiWindowFlags_NoResize)) {
         render_content();
@@ -55,11 +52,6 @@ void SettingsDialog::render_content() {
         
         if (ImGui::BeginTabItem("Paths")) {
             render_paths_tab(settings);
-            ImGui::EndTabItem();
-        }
-        
-        if (ImGui::BeginTabItem("Logging")) {
-            render_logging_tab(settings);
             ImGui::EndTabItem();
         }
         
@@ -186,122 +178,6 @@ void SettingsDialog::render_export_tab(AppSettings& settings) {
 void SettingsDialog::render_paths_tab(AppSettings& settings) {
     ImGui::Spacing();
     
-    // Game Install Path
-    ImGui::Text("Game Install Path:");
-    widgets::HelpMarker("Path to the game installation folder (e.g., C:\\Program Files\\Steam\\steamapps\\common\\Arma Reforger)\nContains the 'Addons' folder with core game PAKs.");
-    
-    char game_path_buffer[512] = {0};
-    std::string game_str = settings.game_install_path.string();
-    strncpy(game_path_buffer, game_str.c_str(), sizeof(game_path_buffer) - 1);
-    
-    ImGui::SetNextItemWidth(-80);
-    if (ImGui::InputText("##GameInstallPath", game_path_buffer, sizeof(game_path_buffer))) {
-        settings.game_install_path = game_path_buffer;
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Browse##GameInstall")) {
-        browse_folder(settings.game_install_path);
-        // Update PakManager
-        auto& pak_mgr = PakManager::instance();
-        pak_mgr.set_game_path(settings.game_install_path);
-        pak_mgr.scan_available_paks();
-    }
-    
-    // Validate game path
-    if (!settings.game_install_path.empty()) {
-        std::filesystem::path addons = settings.game_install_path / "Addons";
-        if (std::filesystem::exists(addons)) {
-            ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "  Valid (Addons folder found)");
-        } else {
-            ImGui::TextColored(ImVec4(0.8f, 0.6f, 0.2f, 1.0f), "  Warning: No Addons folder found");
-        }
-    }
-    
-    ImGui::Spacing();
-    
-    // Mods Install Path
-    ImGui::Text("Mods Install Path:");
-    widgets::HelpMarker("Path to the mods folder (e.g., Workshop folder or custom mods location)\nContains mod PAK files for lazy loading.");
-    
-    char mods_path_buffer[512] = {0};
-    std::string mods_str = settings.mods_install_path.string();
-    strncpy(mods_path_buffer, mods_str.c_str(), sizeof(mods_path_buffer) - 1);
-    
-    ImGui::SetNextItemWidth(-80);
-    if (ImGui::InputText("##ModsInstallPath", mods_path_buffer, sizeof(mods_path_buffer))) {
-        settings.mods_install_path = mods_path_buffer;
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Browse##ModsInstall")) {
-        browse_folder(settings.mods_install_path);
-        // Update PakManager
-        auto& pak_mgr = PakManager::instance();
-        pak_mgr.set_mods_path(settings.mods_install_path);
-        pak_mgr.scan_available_paks();
-    }
-    
-    // Validate mods path
-    if (!settings.mods_install_path.empty()) {
-        if (std::filesystem::exists(settings.mods_install_path)) {
-            ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "  Valid");
-        } else {
-            ImGui::TextColored(ImVec4(0.8f, 0.4f, 0.2f, 1.0f), "  Path does not exist");
-        }
-    }
-    
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-    
-    // Show PAK stats
-    auto& pak_mgr = PakManager::instance();
-    auto& pak_index = PakIndex::instance();
-    
-    ImGui::Text("PAK Status:");
-    ImGui::Text("  Available PAKs: %zu", pak_mgr.available_pak_count());
-    ImGui::Text("  Loaded PAKs: %zu", pak_mgr.loaded_pak_count());
-    
-    ImGui::Spacing();
-    ImGui::Text("File Index:");
-    if (pak_index.is_ready()) {
-        ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), 
-                          "  Indexed: %zu files in %zu PAKs", 
-                          pak_index.total_files(), pak_index.total_paks());
-    } else {
-        ImGui::TextColored(ImVec4(0.8f, 0.6f, 0.2f, 1.0f), "  Index not built");
-    }
-    
-    if (ImGui::Button("Scan for PAKs")) {
-        pak_mgr.set_game_path(settings.game_install_path);
-        pak_mgr.set_mods_path(settings.mods_install_path);
-        pak_mgr.scan_available_paks();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Rebuild Index")) {
-        // Set paths
-        pak_index.set_game_path(settings.game_install_path);
-        pak_index.set_mods_path(settings.mods_install_path);
-        
-        // Show that we're rebuilding
-        App::instance().set_loading(true, "Rebuilding file index...");
-        
-        // Build index (this may take a while for many PAKs)
-        pak_index.build_index([](const std::string& pak_name, int current, int total) {
-            App::instance().set_loading(true, 
-                "Indexing: " + pak_name + " (" + std::to_string(current) + "/" + std::to_string(total) + ")");
-        });
-        
-        App::instance().set_loading(false);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Load Common PAKs")) {
-        pak_mgr.load_common_paks();
-    }
-    
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-    
     ImGui::Text("Default Export Path:");
     char export_path_buffer[512] = {0};
     std::string export_str = settings.last_export_path.string();
@@ -321,7 +197,7 @@ void SettingsDialog::render_paths_tab(AppSettings& settings) {
     ImGui::Spacing();
     
     ImGui::Text("Recent Paths:");
-    ImGui::BeginChild("RecentPaths", ImVec2(0, 100), true);
+    ImGui::BeginChild("RecentPaths", ImVec2(0, 150), true);
     
     // Show recent paths
     static std::vector<std::string> recent_paths;
@@ -344,72 +220,6 @@ void SettingsDialog::render_paths_tab(AppSettings& settings) {
     if (ImGui::Button("Clear Recent Paths")) {
         recent_paths.clear();
     }
-}
-
-void SettingsDialog::render_logging_tab(AppSettings& settings) {
-    ImGui::Spacing();
-    
-    ImGui::Text("Log Level:");
-    widgets::HelpMarker("Higher log levels show more details. Debug is most verbose.");
-    
-    const char* log_levels[] = {"Debug", "Info", "Warning", "Error", "None"};
-    static int current_log_level = static_cast<int>(Logger::instance().get_level());
-    
-    if (ImGui::Combo("##LogLevel", &current_log_level, log_levels, IM_ARRAYSIZE(log_levels))) {
-        Logger::instance().set_level(static_cast<LogLevel>(current_log_level));
-        LOG_INFO("Settings", "Log level changed to: " << log_levels[current_log_level]);
-    }
-    
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-    
-    static bool console_output = true;
-    if (ImGui::Checkbox("Console Output", &console_output)) {
-        Logger::instance().set_console_output(console_output);
-    }
-    widgets::HelpMarker("Write log messages to console (stdout/stderr)");
-    
-    ImGui::Spacing();
-    
-    ImGui::Text("Log File:");
-    static char log_path_buffer[512] = {0};
-    static bool log_to_file = false;
-    
-    ImGui::Checkbox("Enable File Logging", &log_to_file);
-    
-    if (log_to_file) {
-        ImGui::SetNextItemWidth(-80);
-        if (ImGui::InputText("##LogPath", log_path_buffer, sizeof(log_path_buffer))) {
-            // Path changed
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Browse##Log")) {
-            // Could add file browse dialog here
-        }
-        
-        if (ImGui::Button("Apply Log File")) {
-            if (strlen(log_path_buffer) > 0) {
-                if (Logger::instance().set_file(log_path_buffer)) {
-                    LOG_INFO("Settings", "Log file opened: " << log_path_buffer);
-                } else {
-                    LOG_ERROR("Settings", "Failed to open log file: " << log_path_buffer);
-                }
-            }
-        }
-    } else {
-        Logger::instance().close_file();
-    }
-    
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-    
-    ImGui::Text("Troubleshooting Tips:");
-    ImGui::BulletText("Set log level to Debug for maximum detail");
-    ImGui::BulletText("Enable file logging to capture output");
-    ImGui::BulletText("Check logs for [ERROR] and [WARN] entries");
-    ImGui::BulletText("PAK/XOB parsing issues logged with file paths");
 }
 
 void SettingsDialog::apply_settings() {

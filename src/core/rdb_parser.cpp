@@ -1,23 +1,15 @@
 ﻿/**
- * Enfusion Unpacker - RDB Parser Implementation
- * 
- * NOTE: This parser is not yet implemented. The RDB format is used for
- * resource databases in Enfusion engine but full parsing is not required
- * for basic PAK extraction. Implementation pending reverse engineering.
+ * Enfusion Unpacker - RDB Parser Implementation (Stub)
  */
 
 #include "enfusion/rdb_parser.hpp"
-#include "enfusion/logging.hpp"
 #include <fstream>
 
 namespace enfusion {
 
 bool RdbParser::parse(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        LOG_WARNING("RdbParser", "Cannot open file: " << path.string());
-        return false;
-    }
+    if (!file) return false;
     
     file.seekg(0, std::ios::end);
     size_t size = file.tellg();
@@ -30,8 +22,7 @@ bool RdbParser::parse(const fs::path& path) {
 }
 
 bool RdbParser::parse(std::span<const uint8_t> data) {
-    // RDB parsing not implemented - format documentation incomplete
-    LOG_DEBUG("RdbParser", "RDB parsing not implemented (size=" << data.size() << " bytes)");
+    // TODO: Actual parsing
     return true;
 }
 

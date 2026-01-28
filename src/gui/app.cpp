@@ -5,9 +5,6 @@
 #include "gui/app.hpp"
 #include "gui/main_window.hpp"
 #include "gui/theme.hpp"
-#include "enfusion/pak_manager.hpp"
-#include "enfusion/pak_index.hpp"
-#include "enfusion/logging.hpp"
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -158,39 +155,13 @@ void App::load_settings() {
             if (j.contains("last_addon_path")) settings_.last_addon_path = j["last_addon_path"].get<std::string>();
             if (j.contains("last_export_path")) settings_.last_export_path = j["last_export_path"].get<std::string>();
             if (j.contains("arma_addons_path")) settings_.arma_addons_path = j["arma_addons_path"].get<std::string>();
-            if (j.contains("game_install_path")) settings_.game_install_path = j["game_install_path"].get<std::string>();
-            if (j.contains("mods_install_path")) settings_.mods_install_path = j["mods_install_path"].get<std::string>();
             if (j.contains("theme")) settings_.theme = j["theme"].get<int>();
             if (j.contains("ui_scale")) settings_.ui_scale = j["ui_scale"].get<float>();
             if (j.contains("convert_textures_to_png")) settings_.convert_textures_to_png = j["convert_textures_to_png"].get<bool>();
             if (j.contains("convert_meshes_to_obj")) settings_.convert_meshes_to_obj = j["convert_meshes_to_obj"].get<bool>();
         }
-    } catch (const std::exception& e) {
-        LOG_WARNING("App", "Failed to load settings: " << e.what() << " - using defaults");
-    }
-    
-    // Initialize PakManager with paths
-    auto& pak_mgr = PakManager::instance();
-    if (!settings_.game_install_path.empty()) {
-        pak_mgr.set_game_path(settings_.game_install_path);
-    }
-    if (!settings_.mods_install_path.empty()) {
-        pak_mgr.set_mods_path(settings_.mods_install_path);
-    }
-    pak_mgr.scan_available_paks();
-    
-    // Initialize file index (loads from cache or builds in background)
-    if (!settings_.game_install_path.empty() || !settings_.mods_install_path.empty()) {
-        // Set loading state
-        set_loading(true, "Building file index...");
-        
-        // Initialize index (will use cache if available)
-        pak_mgr.initialize_index([this](const std::string& pak_name, int current, int total) {
-            std::string msg = "Indexing: " + pak_name + " (" + std::to_string(current) + "/" + std::to_string(total) + ")";
-            loading_message_ = msg;
-        });
-        
-        set_loading(false);
+    } catch (...) {
+        // Use defaults
     }
 }
 
@@ -200,8 +171,6 @@ void App::save_settings() {
         j["last_addon_path"] = settings_.last_addon_path.string();
         j["last_export_path"] = settings_.last_export_path.string();
         j["arma_addons_path"] = settings_.arma_addons_path.string();
-        j["game_install_path"] = settings_.game_install_path.string();
-        j["mods_install_path"] = settings_.mods_install_path.string();
         j["theme"] = settings_.theme;
         j["ui_scale"] = settings_.ui_scale;
         j["convert_textures_to_png"] = settings_.convert_textures_to_png;
@@ -209,8 +178,8 @@ void App::save_settings() {
         
         std::ofstream file("settings.json");
         file << j.dump(2);
-    } catch (const std::exception& e) {
-        LOG_ERROR("App", "Failed to save settings: " << e.what());
+    } catch (...) {
+        // Ignore
     }
 }
 

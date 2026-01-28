@@ -5,8 +5,6 @@
 #include "gui/file_browser.hpp"
 #include "gui/widgets.hpp"
 #include "enfusion/addon_extractor.hpp"
-#include "enfusion/pak_manager.hpp"
-#include "enfusion/logging.hpp"
 
 #include <imgui.h>
 #include <algorithm>
@@ -18,9 +16,6 @@ void FileBrowser::load(const std::filesystem::path& addon_path) {
     entries_.clear();
     tree_root_.children.clear();
     tree_root_.name = addon_path.filename().string();
-    
-    // Register the PAK with PakManager for cross-reference lookups
-    auto& pak_mgr = PakManager::instance();
 
     // Try to load from addon directory (with data.pak, rdb, manifest)
     if (std::filesystem::is_directory(addon_path)) {
@@ -28,8 +23,6 @@ void FileBrowser::load(const std::filesystem::path& addon_path) {
         auto rdb_path = addon_path / "resourceDatabase.rdb";
         
         if (std::filesystem::exists(pak_path) && std::filesystem::exists(rdb_path)) {
-            // Register with PakManager
-            pak_mgr.load_pak(addon_path);
             // Load from addon using AddonExtractor
             load_from_addon(addon_path);
         } else {
@@ -85,8 +78,7 @@ void FileBrowser::load_from_addon(const std::filesystem::path& addon_dir) {
 
             entries_.push_back(fe);
         }
-    } catch (const std::exception& e) {
-        LOG_ERROR("FileBrowser", "Failed to load PAK: " << e.what());
+    } catch (...) {
         extractor_.reset();
     }
 }
@@ -124,8 +116,8 @@ void FileBrowser::load_from_directory(const std::filesystem::path& dir_path) {
                 entries_.push_back(fe);
             }
         }
-    } catch (const std::exception& e) {
-        LOG_ERROR("FileBrowser", "Failed to load directory: " << e.what());
+    } catch (...) {
+        // Handle error
     }
 }
 
@@ -280,21 +272,6 @@ void FileBrowser::render_tree_node(const TreeNode& node) {
             }
         }
 
-        // Context menu for tree view files
-        if (node.entry) {
-            if (ImGui::BeginPopupContextItem()) {
-                if (ImGui::MenuItem("Export...")) {
-                    if (on_export_requested) {
-                        on_export_requested(node.entry->path);
-                    }
-                }
-                if (ImGui::MenuItem("Copy Path")) {
-                    ImGui::SetClipboardText(node.entry->path.c_str());
-                }
-                ImGui::EndPopup();
-            }
-        }
-
         // Tooltip with size
         if (ImGui::IsItemHovered() && node.entry) {
             ImGui::BeginTooltip();
@@ -332,9 +309,7 @@ void FileBrowser::render_flat_list() {
         // Context menu
         if (ImGui::BeginPopupContextItem()) {
             if (ImGui::MenuItem("Export...")) {
-                if (on_export_requested) {
-                    on_export_requested(entry->path);
-                }
+                // TODO: Export dialog
             }
             if (ImGui::MenuItem("Copy Path")) {
                 ImGui::SetClipboardText(entry->path.c_str());

@@ -30,9 +30,6 @@ public:
     void refresh();
 
     std::function<void(const fs::path&)> on_addon_selected;
-    
-    // Get list of all scanned addons
-    const std::vector<AddonInfo>& get_addons() const { return addons_; }
 
 private:
     void render_addon_card(const AddonInfo& addon, int index);
@@ -47,7 +44,6 @@ private:
     fs::path current_folder_;
     char search_filter_[256] = {};
     int selected_index_ = -1;
-    int source_index_ = 0;  // 0 = mods, 1 = game addons
 
     SelectCallback on_select_;
 

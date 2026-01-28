@@ -3,7 +3,6 @@
  */
 
 #include "renderer/shader.hpp"
-#include "enfusion/logging.hpp"
 #include <glad/glad.h>
 #include <fstream>
 #include <sstream>
@@ -131,14 +130,14 @@ bool Shader::check_compile_errors(GLuint shader, const std::string& type) {
         glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
         if (!success) {
             glGetShaderInfoLog(shader, 1024, nullptr, info_log);
-            LOG_ERROR("Shader", "Shader compilation error (" << type << "): " << info_log);
+            std::cerr << "Shader compilation error (" << type << "): " << info_log << std::endl;
             return false;
         }
     } else {
         glGetProgramiv(shader, GL_LINK_STATUS, &success);
         if (!success) {
             glGetProgramInfoLog(shader, 1024, nullptr, info_log);
-            LOG_ERROR("Shader", "Program linking error: " << info_log);
+            std::cerr << "Program linking error: " << info_log << std::endl;
             return false;
         }
     }
@@ -191,121 +190,25 @@ in vec2 TexCoord;
 uniform vec3 lightDir;
 uniform vec3 lightColor;
 uniform vec3 objectColor;
-uniform vec3 baseColor;     // Base color from emat (for MCR materials)
 uniform bool useTexture;
-uniform bool isMCRTexture;  // True for _MCR textures (Metallic-Cavity-Roughness)
-uniform bool hasBaseColor;  // True if baseColor was set from emat
-uniform bool debugMaterialColors;  // Debug: show material colors instead of textures
-uniform int debugMaterialIndex;    // Debug: which material (for coloring)
 uniform sampler2D diffuseMap;
 
-// Hash function for deterministic material colors
-vec3 hashMaterialColor(int matIdx) {
-    // Generate unique colors for each material index
-    float r = fract(sin(float(matIdx) * 12.9898) * 43758.5453);
-    float g = fract(sin(float(matIdx) * 78.233 + 1.0) * 43758.5453);
-    float b = fract(sin(float(matIdx) * 39.425 + 2.0) * 43758.5453);
-    // Make colors more saturated and distinct
-    return vec3(r, g, b) * 0.6 + vec3(0.2);
-}
-
 void main() {
+    // Ambient
+    float ambientStrength = 0.3;
+    vec3 ambient = ambientStrength * lightColor;
+    
+    // Diffuse
     vec3 norm = normalize(Normal);
-    
-    // Main directional light
-    float NdotL = max(dot(norm, -lightDir), 0.0);
-    
-    // Fill light from opposite side (soft)
-    float fillNdotL = max(dot(norm, lightDir), 0.0) * 0.3;
-    
-    // Sky/ambient from above
-    float skyNdotL = dot(norm, vec3(0.0, 1.0, 0.0)) * 0.5 + 0.5;
-    
-    // Ground bounce (subtle)
-    float groundNdotL = max(dot(norm, vec3(0.0, -1.0, 0.0)), 0.0) * 0.1;
-    
-    // Combine lighting
-    float totalLight = 0.35 +           // Ambient base
-                       NdotL * 0.55 +    // Main light
-                       fillNdotL +       // Fill light
-                       skyNdotL * 0.15 + // Sky light
-                       groundNdotL;      // Ground bounce
-    
-    // Debug mode: show material colors instead of textures
-    if (debugMaterialColors) {
-        vec3 matColor = hashMaterialColor(debugMaterialIndex);
-        vec3 result = matColor * totalLight;
-        result = pow(result, vec3(1.0/2.2));
-        FragColor = vec4(result, 1.0);
-        return;
-    }
+    float diff = max(dot(norm, -lightDir), 0.0);
+    vec3 diffuse = diff * lightColor;
     
     vec3 color = objectColor;
     if (useTexture) {
-        vec4 texColor = texture(diffuseMap, TexCoord);
-        
-        if (isMCRTexture) {
-            // MCR texture: Metallic-Cavity-Roughness format
-            // R = Metallic (0 = dielectric, 1 = metal)
-            // G = Cavity/AO (ambient occlusion detail)
-            // B = Roughness (0 = smooth, 1 = rough)
-            //
-            // The actual base color comes from the emat's Color_3 parameter.
-            
-            float metallic = texColor.r;
-            float cavity = texColor.g;  // AO/cavity for detail
-            float roughness = texColor.b;
-            
-            // Use base color from emat if available, otherwise derive a grayscale
-            // signal from MCR to avoid flat-color previews.
-            vec3 surfaceColor = hasBaseColor ? baseColor : vec3(0.5, 0.5, 0.5);
-            vec3 mcrGray = vec3(metallic * 0.4 + cavity * 0.4 + (1.0 - roughness) * 0.2);
-            if (!hasBaseColor) {
-                surfaceColor = mcrGray;
-            }
-            
-            // Stronger cavity/roughness modulation to reveal detail in preview
-            float cavityMult = mix(0.4, 1.2, cavity);
-            float roughMult = mix(1.15, 0.7, roughness);
-            float metallicBoost = mix(1.0, 1.2, metallic);
-            
-            color = surfaceColor * cavityMult * roughMult * metallicBoost;
-            
-        } else {
-            // BCR/standard diffuse texture: RGB = base color
-            // If we have a color parameter from emat, use it as a tint/multiplier
-            // (For MatPBRBasic materials, Color is often a tint for the BCR texture)
-            if (hasBaseColor) {
-                // Apply color tint, but check if it's dark (could be unused/default)
-                float colorBrightness = (baseColor.r + baseColor.g + baseColor.b) / 3.0;
-                if (colorBrightness > 0.1) {
-                    // Non-trivial color - multiply (tint)
-                    color = texColor.rgb * baseColor * 2.0;  // 2x because colors are often 0.5ish
-                } else {
-                    // Very dark color - ignore it, use texture only
-                    color = texColor.rgb;
-                }
-            } else {
-                color = texColor.rgb;
-            }
-        }
-    } else if (hasBaseColor) {
-        // No texture but we have a base color from emat
-        color = baseColor;
+        color = texture(diffuseMap, TexCoord).rgb;
     }
     
-    // Apply lighting
-    vec3 result = color * totalLight * lightColor;
-    
-    // Slight exposure boost
-    result *= 1.15;
-    
-    // Gamma correction (linear to sRGB)
-    result = pow(result, vec3(1.0/2.2));
-    
-    // Clamp
-    result = clamp(result, 0.0, 1.0);
-    
+    vec3 result = (ambient + diffuse) * color;
     FragColor = vec4(result, 1.0);
 }
 )";
